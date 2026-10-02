@@ -137,6 +137,86 @@ describe "compile-time checks" do
     output.should contain("'pad' is ambiguous")
   end
 
+  it "reports a hint that collides with a file-private method" do
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      private def int3(value)
+        "mine"
+      end
+      bbwrite b, "\#{int3(1)}"
+      CRYSTAL
+    output.should contain("'int3' is ambiguous: it names a ByteBuilder appender and a method available here")
+    compile_output(<<-CRYSTAL).should eq("")
+      #{PRELUDE}
+      private def int3(value)
+        "mine"
+      end
+      bbwrite b, "\#{(int3(1))}\#{b.int3(1)}\#{hex2(1_u8)}"
+      CRYSTAL
+  end
+
+  it "reports an each loop that collides with a method of the calling class" do
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      class Bag
+        include Enumerable(Int32)
+
+        def each(&)
+          yield 1
+        end
+
+        def draw(b)
+          bbwrite b, "\#{each([1]) { |n| "\#{n}" }}"
+        end
+      end
+      Bag.new.draw(b)
+      CRYSTAL
+    output.should contain("'each' is ambiguous: it is the bbwrite loop and a method available here")
+    compile_output(<<-CRYSTAL).should eq("")
+      #{PRELUDE}
+      class Bag
+        include Enumerable(Int32)
+
+        def each(&)
+          yield 1
+        end
+
+        def draw(b)
+          bbwrite b, "\#{b.each(self) { |n| "\#{n}" }}"
+        end
+      end
+      Bag.new.draw(b)
+      CRYSTAL
+  end
+
+  it "rejects malformed each loops" do
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      bbwrite b, "\#{each([1]) { |n| n.to_s }}"
+      CRYSTAL
+    output.should contain("the block of each must contain only a string literal")
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      bbwrite b, "\#{each([1], ",", 3) { |n| "x" }}"
+      CRYSTAL
+    output.should contain("each takes a collection and an optional separator")
+  end
+
+  it "rejects loops and unsized appenders where the size must be known" do
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      ByteBuilder.define listing(items), "[\#{each(items) { |item| "\#{item}" }}]"
+      b.listing([1])
+      CRYSTAL
+    output.should contain("an each loop has no size known in advance")
+    output = compile_output(<<-CRYSTAL)
+      #{PRELUDE}
+      flag = true
+      bbwrite b, "\#{"[\#{each([1]) { |n| "\#{n}" }}]" if flag}"
+      CRYSTAL
+    output.should contain("an each loop has no size known in advance")
+  end
+
   it "accepts the unambiguous spellings in a class that defines the same name" do
     compile_output(<<-CRYSTAL).should eq("")
       #{PRELUDE}
@@ -179,7 +259,7 @@ describe "compile-time checks" do
       ByteBuilder.define loud(text), "\#{shout(text)}!"
       b.loud("x")
       CRYSTAL
-    output.should contain("appender 'shout' reports no size, so it cannot be used inside ByteBuilder.define")
+    output.should contain("appender 'shout' reports no size, so it cannot be used inside ByteBuilder.define or inside a conditional branch")
   end
 
   it "rejects a field value of an unsupported type" do

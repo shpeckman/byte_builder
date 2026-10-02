@@ -115,12 +115,46 @@ Bench.group("control string with optional fields, #{Bench::BATCH} per iteration"
     end
     Bench.keep(b)
   end
+  job.report("bbwrite with conditional branches") do
+    b.reset
+    Bench::BATCH.times do |i|
+      columns = rows.unsafe_fetch(i)
+      bbwrite b, "\e_Ga=p,i=#{i}#{",c=#{columns}" if columns}#{",r=#{absent}" if absent},z=#{columns}\e\\"
+    end
+    Bench.keep(b)
+  end
   job.report("bbwrite with field hints") do
     b.reset
     Bench::BATCH.times do |i|
       columns = rows.unsafe_fetch(i)
       bbwrite b, "\e_Ga=p,i=#{i}#{field(",c=", columns)}#{field(",r=", absent)}#{field(",z=", columns)}\e\\"
     end
+    Bench.keep(b)
+  end
+end
+
+Bench.group("separated list of 8 strings, #{Bench::BATCH} per iteration") do |job|
+  mimes = Array.new(8) { |i| "application/x-type-#{i}" }
+  job.report("interpolation + join") do
+    b.reset
+    Bench::BATCH.times { b.str("\e]52;#{mimes.join(' ')}\e\\") }
+    Bench.keep(b)
+  end
+  job.report("chained appends in a loop") do
+    b.reset
+    Bench::BATCH.times do
+      b.osc(52)
+      mimes.each_with_index do |mime, index|
+        b.byte(0x20_u8) if index > 0
+        b.str(mime)
+      end
+      b.st
+    end
+    Bench.keep(b)
+  end
+  job.report("bbwrite with each") do
+    b.reset
+    Bench::BATCH.times { bbwrite b, "\e]52;#{each(mimes, ' ') { |mime| "#{mime}" }}\e\\" }
     Bench.keep(b)
   end
 end

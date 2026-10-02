@@ -20,6 +20,7 @@ ByteBuilder.define paint(int : Int32, st : String), "\e[38;5;#{int3(int)}m#{st}\
 ByteBuilder.define placed(row, col, label), "#{move(row, col)}#{label}"
 ByteBuilder.define tagged(key : String, value), "<#{field(prefix: key, value: value)}#{base64(key)}>"
 ByteBuilder.define counted(counter), "#{counter.call}:#{counter.call}"
+ByteBuilder.define option(key : String, value), "<#{"#{key}=#{value};" if value}#{value ? "set#{int3(1)}" : "unset"}>"
 
 private class Screen
   getter builder = ByteBuilder.new(16)
@@ -189,6 +190,146 @@ describe "bbwrite" do
     screen = Screen.new(5, "title")
     screen.render
     text(screen.builder).should eq("\e[5;1Htitle!")
+  end
+end
+
+describe "bbwrite conditional branches" do
+  it "writes a branch only when its condition holds" do
+    builder = ByteBuilder.new(16)
+    columns = 4.as(Int32?)
+    rows    = nil.as(Int32?)
+    free    = true
+    bbwrite builder, "a=p#{",c=#{columns}" if columns}#{",r=#{rows}" if rows}#{",d=A" if free}#{",x" unless free}|"
+    text(builder).should eq("a=p,c=4,d=A|")
+  end
+
+  it "chooses between two branches" do
+    builder = ByteBuilder.new(16)
+    [true, false].each do |more|
+      bbwrite builder, "#{more ? "m=1;#{int3(7)}" : "m=0"}|#{more ? "" : "last#{more}"}|"
+    end
+    text(builder).should eq("m=1;7||m=0|lastfalse|")
+  end
+
+  it "treats && as a condition and writes nothing when it fails" do
+    builder = ByteBuilder.new(16)
+    flag    = false
+    value   = 3
+    bbwrite builder, "<#{flag && "never"}#{!flag && "shown#{value}"}#{value > 2 && ",big"}>"
+    text(builder).should eq("<shown3,big>")
+  end
+
+  it "evaluates the condition once and a branch's values only when taken" do
+    builder = ByteBuilder.new(16)
+    calls   = [] of String
+    note    = ->(label : String) { calls << label; label }
+    bbwrite builder, "#{note.call("a")}#{note.call("c1") == "c1" ? "y#{note.call("y")}" : "n#{note.call("n")}"}#{"z#{note.call("skip")}" if note.call("c2") == "no"}#{note.call("b")}"
+    calls.should eq(["a", "c1", "y", "c2", "b"])
+    text(builder).should eq("ayyb")
+  end
+
+  it "nests branches and hints inside branches" do
+    builder = ByteBuilder.new(16)
+    outer   = true
+    inner   = 5.as(Int32?)
+    absent  = nil.as(Int32?)
+    bbwrite builder, "#{"[#{"i=#{inner}" if inner}#{field(",f=", absent)}#{field(",g=", inner)}#{move(1, 2)}#{"none" unless inner}]" if outer}"
+    text(builder).should eq("[i=5,g=5\e[1;2H]")
+  end
+
+  it "reserves once for long branch contents" do
+    builder = ByteBuilder.new(16)
+    long    = "q" * 3000
+    40.times do |n|
+      bbwrite builder, "#{long}#{n.even? ? "even#{long}#{base64(long)}" : "odd#{n}"}#{"!#{long}" if n % 3 == 0}tail#{n}"
+    end
+    encoded = Base64.strict_encode(long)
+    expected = (0...40).join do |n|
+      "#{long}#{n.even? ? "even#{long}#{encoded}" : "odd#{n}"}#{n % 3 == 0 ? "!#{long}" : ""}tail#{n}"
+    end
+    text(builder).should eq(expected)
+    builder.capacity.should be >= builder.pos
+  end
+
+  it "keeps ordinary conditional values as values" do
+    builder = ByteBuilder.new(16)
+    wide    = true
+    count   = 2
+    bbwrite builder, "#{wide ? 80 : 40}|#{count > 1 ? 'p' : 's'}|#{wide ? nil : 1}|"
+    text(builder).should eq("80|p||")
+  end
+
+  it "works inside a defined template" do
+    builder = ByteBuilder.new(16)
+    builder.option("k", 5).option("z", nil)
+    bbwrite builder, "#{option("n", "v")}"
+    text(builder).should eq("<k=5;set1><unset><n=v;set1>")
+  end
+end
+
+describe "bbwrite each loops" do
+  it "writes its block once per item" do
+    builder = ByteBuilder.new(16)
+    bbwrite builder, "[#{each([1, 2, 3]) { |n| "n#{n};" }}]"
+    text(builder).should eq("[n1;n2;n3;]")
+  end
+
+  it "puts a separator between items" do
+    builder = ByteBuilder.new(16)
+    mimes   = ["text/plain", "text/html", "image/png"]
+    bbwrite builder, "\e]52;#{each(mimes, ' ') { |mime| "#{mime}" }}\e\\#{each(mimes, ", ") { |mime| "#{mime.size}" }}"
+    text(builder).should eq("\e]52;text/plain text/html image/png\e\\10, 9, 9")
+  end
+
+  it "writes nothing for an empty collection" do
+    builder = ByteBuilder.new(16)
+    bbwrite builder, "<#{each([] of Int32, ",") { |n| "#{n}" }}>"
+    text(builder).should eq("<>")
+  end
+
+  it "destructures several block arguments and accepts do-end blocks" do
+    builder = ByteBuilder.new(16)
+    bbwrite builder, "#{each({"a" => 1, "b" => 2}) { |key, value| "#{key}=#{value};" }}"
+    bbwrite(builder, "#{each(1..3, '-') do |n|
+                          "#{n}"
+                        end}")
+    bbwrite builder, "#{each(2.times) { "x" }}"
+    text(builder).should eq("a=1;b=2;1-2-3xx")
+  end
+
+  it "nests loops, branches, and hints" do
+    builder = ByteBuilder.new(16)
+    bbwrite builder, "#{builder.each(%w(x y), "|") { |word| "#{each(1..2) { |n| "#{word}#{int3(n)}#{"!" if n == 2}" }}" }}"
+    text(builder).should eq("x1x2!|y1y2!")
+  end
+
+  it "evaluates the collection and separator once, in source order" do
+    builder = ByteBuilder.new(16)
+    calls   = [] of String
+    note    = ->(label : String) { calls << label; label }
+    bbwrite builder, "#{note.call("a")}#{each([note.call("items")], note.call("sep")) { |item| "#{item}" }}#{note.call("b")}"
+    calls.should eq(["a", "items", "sep", "b"])
+    text(builder).should eq("aitemsb")
+  end
+
+  it "reserves again after the loop" do
+    builder = ByteBuilder.new(16)
+    long    = "k" * 2500
+    30.times do |n|
+      bbwrite builder, "#{long}#{each([long, long, long], ';') { |item| "<#{item}#{int3(n)}>" }}#{long}#{int3(n)}#{n}tail"
+    end
+    expected = (0...30).join { |n| "#{long}#{Array.new(3) { "<#{long}#{n}>" }.join(';')}#{long}#{n}#{n}tail" }
+    text(builder).should eq(expected)
+    builder.capacity.should be >= builder.pos
+  end
+
+  it "uses the caller's builder expression only once" do
+    builder = ByteBuilder.new(16)
+    lookups = 0
+    fetch   = -> { lookups += 1; builder }
+    bbwrite fetch.call, "#{each([1, 2, 3]) { |n| "#{n}" }}"
+    lookups.should eq(1)
+    text(builder).should eq("123")
   end
 end
 

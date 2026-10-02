@@ -10,10 +10,11 @@ def text(builder : ByteBuilder) : String
 end
 
 def compile_output(source : String) : String
-  program = IO::Memory.new(%(require "../src/byte_builder"\n#{source}\n))
-  output  = IO::Memory.new
-  status = Process.run(COMPILER,
-    ["build", "--no-codegen", "--no-color", "--stdin-filename", File.join(__DIR__, "compile_probe.cr")],
-    input: program, output: output, error: output)
+  path = File.join(__DIR__, "compile_probe_#{Random::Secure.hex(6)}.cr")
+  File.write(path, %(require "../src/byte_builder"\n#{source}\n))
+  output = IO::Memory.new
+  status = Process.run(COMPILER, ["build", "--no-codegen", "--no-color", path], output: output, error: output)
   status.success? ? "" : output.to_s
+ensure
+  File.delete?(path) if path
 end

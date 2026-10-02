@@ -108,6 +108,33 @@ class ByteBuilder
     builder
   end
 
+  struct Else(T)
+    getter values : T
+
+    def initialize(@values : T)
+    end
+  end
+
+  @[AlwaysInline]
+  def self.on_then(values : Tuple, &) : Int32
+    yield values
+  end
+
+  @[AlwaysInline]
+  def self.on_then(values : Else | Nil, &) : Int32
+    0
+  end
+
+  @[AlwaysInline]
+  def self.on_else(values : Else, &) : Int32
+    yield values.values
+  end
+
+  @[AlwaysInline]
+  def self.on_else(values : Tuple | Nil, &) : Int32
+    0
+  end
+
   @[AlwaysInline]
   def reset : Nil
     @pos = 0

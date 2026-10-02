@@ -4,7 +4,7 @@ class ByteBuilder
     bbwrite({{builder}}, {{text}})
   end
 
-  macro expand(builder, text, mode, parameters, taken)
+  macro expand(builder, text, mode, parameters, taken, target = nil)
     {% source = text.is_a?(Path) ? text.resolve : text %}
     {% unless source.is_a?(StringInterpolation) || source.is_a?(StringLiteral) %}
       {% text.raise "bbwrite expects a string literal or a constant holding one, not #{text.class_name.id}" %}
@@ -37,6 +37,70 @@ class ByteBuilder
         {% opaque << false %}
         {% lines << (size > 0 ? "__bbb.unsafe_str(#{piece})" : "") %}
       {% else %}
+        {% condition = nil %}
+        {% positive = nil %}
+        {% negative = nil %}
+        {% if piece.is_a?(If) %}
+          {% condition = piece.cond %}
+          {% positive = piece.then %}
+          {% negative = piece.else %}
+        {% elsif piece.is_a?(And) %}
+          {% condition = piece.left %}
+          {% positive = piece.right %}
+        {% end %}
+        {% positive_text = positive.is_a?(StringLiteral) || positive.is_a?(StringInterpolation) %}
+        {% negative_text = negative.is_a?(StringLiteral) || negative.is_a?(StringInterpolation) %}
+        {% branching = !condition.nil? && ((positive_text && (negative_text || negative.nil?)) || (positive.nil? && negative_text)) %}
+        {% looping = false %}
+        {% if piece.is_a?(Call) && piece.block && piece.name == "each" %}
+          {% bare = piece.receiver.is_a?(Nop) && !piece.global? && !shadowed.includes?("each") %}
+          {% own = !piece.receiver.is_a?(Nop) && piece.receiver.id == builder.id %}
+          {% looping = bare || own %}
+          {% if bare && ambiguous.includes?("each") %}
+            {% piece.raise "'each' is ambiguous: it is the bbwrite loop and a method available here. Write #{builder}.each(...) { ... } for the loop, or (each(...) { ... }) for your own method." %}
+          {% end %}
+        {% end %}
+        {% start = slots.size %}
+        {% if branching %}
+          {% yes = positive_text ? "::ByteBuilder.expand(#{builder}, #{positive}, \"values\", #{parameters}, #{taken})" : "nil" %}
+          {% no = negative_text ? "::ByteBuilder::Else.new(::ByteBuilder.expand(#{builder}, #{negative}, \"values\", #{parameters}, #{taken}))" : "nil" %}
+          {% slots << "((#{condition}) ? #{yes.id} : #{no.id})" %}
+          {% term = "" %}
+          {% line = "" %}
+          {% if positive_text %}
+            {% term = "(::ByteBuilder.on_then(__bbv[#{start}]) { |__bbv| ::ByteBuilder.expand(#{builder}, #{positive}, \"bound\", #{parameters}, #{taken}) })" %}
+            {% line = "::ByteBuilder.on_then(__bbv[#{start}]) do |__bbv|\n::ByteBuilder.expand(#{builder}, #{positive}, \"unsafe\", #{parameters}, #{taken})\n0\nend\n" %}
+          {% end %}
+          {% if negative_text %}
+            {% term = (term.empty? ? "" : term + " + ") + "(::ByteBuilder.on_else(__bbv[#{start}]) { |__bbv| ::ByteBuilder.expand(#{builder}, #{negative}, \"bound\", #{parameters}, #{taken}) })" %}
+            {% line = line + "::ByteBuilder.on_else(__bbv[#{start}]) do |__bbv|\n::ByteBuilder.expand(#{builder}, #{negative}, \"unsafe\", #{parameters}, #{taken})\n0\nend\n" %}
+          {% end %}
+          {% statics << 0 %}
+          {% terms << term %}
+          {% opaque << false %}
+          {% lines << line %}
+        {% elsif looping %}
+          {% if mode != "write" %}
+            {% piece.raise "an each loop has no size known in advance, so it cannot be used inside ByteBuilder.define or inside a conditional branch" %}
+          {% end %}
+          {% body = piece.block.body %}
+          {% unless body.is_a?(StringLiteral) || body.is_a?(StringInterpolation) %}
+            {% piece.raise "the block of each must contain only a string literal, which is written once per item" %}
+          {% end %}
+          {% if piece.args.size < 1 || piece.args.size > 2 || piece.named_args %}
+            {% piece.raise "each takes a collection and an optional separator, then a block: each(items, \", \") { |item| \"...\" }" %}
+          {% end %}
+          {% for arg in piece.args %}
+            {% slots << "#{arg}" %}
+          {% end %}
+          {% arguments = piece.block.args %}
+          {% item = arguments.empty? ? "__bbe" : (arguments.size == 1 ? "#{arguments[0]}" : "(#{arguments.join(", ").id})") %}
+          {% separator = piece.args.size == 2 ? "__bbb.put(__bbv[#{start + 1}]) if __bbn > 0\n" : "" %}
+          {% statics << 0 %}
+          {% terms << "" %}
+          {% opaque << true %}
+          {% lines << "__bbv[#{start}].each_with_index do |#{item.id}, __bbn|\n#{separator.id}::ByteBuilder.expand(#{builder}, #{body}, \"write\", #{parameters}, #{taken}, __bbb)\nend\n" %}
+        {% else %}
         {% overloads = [] of Def %}
         {% name = "" %}
         {% if piece.is_a?(Call) && !piece.block %}
@@ -50,7 +114,6 @@ class ByteBuilder
             {% piece.raise "'#{name.id}' is ambiguous: it names a ByteBuilder appender and a method available here. Write #{builder}.#{name.id}(...) for the appender, or (#{name.id}(...)) for your own method." %}
           {% end %}
         {% end %}
-        {% start = slots.size %}
         {% if overloads.empty? %}
           {% slots << "#{piece}" %}
           {% statics << 0 %}
@@ -100,7 +163,7 @@ class ByteBuilder
               {% lines << "__bbb.unsafe_#{name.id}(#{list.id})" %}
             {% else %}
               {% if mode != "write" %}
-                {% piece.raise "appender '#{name.id}' reports no size, so it cannot be used inside ByteBuilder.define" %}
+                {% piece.raise "appender '#{name.id}' reports no size, so it cannot be used inside ByteBuilder.define or inside a conditional branch" %}
               {% end %}
               {% statics << 0 %}
               {% terms << "" %}
@@ -108,6 +171,7 @@ class ByteBuilder
               {% lines << "__bbb.#{name.id}(#{list.id})" %}
             {% end %}
           {% end %}
+        {% end %}
         {% end %}
       {% end %}
     {% end %}
@@ -119,20 +183,19 @@ class ByteBuilder
     {% for term in terms %}
       {% bound = bound + " + " + term unless term.empty? %}
     {% end %}
-    {% tuple = slots.empty? ? "::Tuple.new" : "{" + slots.join(", ") + "}" %}
+    {% tuple = slots.empty? ? "::Tuple.new" : "{ " + slots.map { |slot| "(#{slot.id})" }.join(", ") + " }" %}
     {% if mode == "values" %}
       {{tuple.id}}
     {% elsif mode == "bound" %}
       {{bound.id}}
     {% elsif mode == "unsafe" %}
-      __bbb = {{builder}}
       {% for line in lines %}
         {% unless line.empty? %}
           {{line.id}}
         {% end %}
       {% end %}
     {% else %}
-      ::ByteBuilder.bind({{builder}}, {{tuple.id}}) do |__bbb, __bbv|
+      ::ByteBuilder.bind({{target ? target : builder}}, {{tuple.id}}) do |__bbb, __bbv|
         __bbb.reserve({{bound.id}})
         {% for line, index in lines %}
           {% unless line.empty? %}
@@ -173,6 +236,7 @@ class ByteBuilder
 
       @[AlwaysInline]
       def unsafe_{{name}}(__bbv) : self
+        __bbb = self
         ::ByteBuilder.expand(self, {{text}}, "unsafe", {{names.join(",")}}, "")
         self
       end

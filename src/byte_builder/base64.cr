@@ -42,11 +42,11 @@ class ByteBuilder
     size   = data.size
     target = (@buf + @pos).as(Pointer(UInt16))
     i      = 0
+    probe  = 1_u16
+    little = pointerof(probe).as(Pointer(UInt8)).value == 1_u8
     while i + 8 <= size
-      bytes = source + i
-      group = (bytes[0].to_u64 << 56) | (bytes[1].to_u64 << 48) | (bytes[2].to_u64 << 40) |
-              (bytes[3].to_u64 << 32) | (bytes[4].to_u64 << 24) | (bytes[5].to_u64 << 16) |
-              (bytes[6].to_u64 << 8) | bytes[7].to_u64
+      word  = (source + i).as(Pointer(UInt64)).value
+      group = little ? word.byte_swap : word
       target[0] = BASE64_PAIRS.unsafe_fetch(group >> 52)
       target[1] = BASE64_PAIRS.unsafe_fetch((group >> 40) & 4095)
       target[2] = BASE64_PAIRS.unsafe_fetch((group >> 28) & 4095)
