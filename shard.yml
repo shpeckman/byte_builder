@@ -1,0 +1,10 @@
+# shard.yml
+name: byte_builder
+version: 0.1.0
+
+authors:
+  - shpeckman
+
+crystal: ">= 1.21"
+
+license: MIT
