@@ -66,48 +66,48 @@ statements.
 
 ### State
 
-| Method | Result |
-|---|---|
-| `pos` | Number of bytes written. |
-| `capacity` | Size of the buffer. |
-| `remaining` | `capacity - pos`. |
-| `empty?` | Whether nothing has been written. |
-| `written` | The written bytes as a `Bytes` view. |
-| `reset` | Sets `pos` to zero and keeps the buffer. |
-| `truncate(position)` | Rolls back to an earlier `pos`. Raises `ArgumentError` if `position` is negative or beyond `pos`. |
-| `reserve(count)` | Makes sure `count` more bytes fit, growing if needed. |
-| `shrink(capacity = 4096)` | Reallocates down to `capacity`, or to `pos` if more is in use. |
-| `io` | A write-only `IO` over the builder. See [Using it as an IO](#using-it-as-an-io). |
+| Method                    | Result                                                                                            |
+|---------------------------|---------------------------------------------------------------------------------------------------|
+| `pos`                     | Number of bytes written.                                                                          |
+| `capacity`                | Size of the buffer.                                                                               |
+| `remaining`               | `capacity - pos`.                                                                                 |
+| `empty?`                  | Whether nothing has been written.                                                                 |
+| `written`                 | The written bytes as a `Bytes` view.                                                              |
+| `reset`                   | Sets `pos` to zero and keeps the buffer.                                                          |
+| `truncate(position)`      | Rolls back to an earlier `pos`. Raises `ArgumentError` if `position` is negative or beyond `pos`. |
+| `reserve(count)`          | Makes sure `count` more bytes fit, growing if needed.                                             |
+| `shrink(capacity = 4096)` | Reallocates down to `capacity`, or to `pos` if more is in use.                                    |
+| `io`                      | A write-only `IO` over the builder. See [Using it as an IO](#using-it-as-an-io).                  |
 
 `written` points into the buffer. An append that grows the buffer, and
 `shrink`, both invalidate it, so take the slice after the last append.
 
 ### Appenders
 
-| Method | Writes |
-|---|---|
-| `byte(UInt8)` | One byte. |
-| `char(Char)` | The character as UTF-8. |
-| `str(String)` | The string's bytes. |
-| `bytes(Bytes)` | The slice. A `StaticArray(UInt8, N)` is accepted too. |
-| `int(value)` | Any integer from `Int8` to `UInt128`, in decimal. |
-| `int2(Int32)` | A value from 0 to 99, without the general digit count. |
-| `int3(Int32)` | A value from 0 to 999, without the general digit count. |
-| `hex(value)` | An unsigned integer in lowercase hexadecimal, without leading zeros. |
-| `hex2(UInt8)` | Exactly two lowercase hexadecimal digits. |
-| `pad(value, width)` | An integer, left-padded with zeros to `width` digits. A minus sign is written before the padding. |
-| `repeat(value, count)` | A byte or a character `count` times. A count of zero or less writes nothing. |
-| `put(value)` | Any supported value, chosen by its type: integers, floats, `Bool`, `Char`, `String`, `Bytes`, `Nil`. `nil` writes nothing. |
-| `field(prefix, value)` | `prefix` followed by `value`, or nothing at all when `value` is `nil`. |
-| `base64(data)` | `Bytes` or a `String`, encoded with padding. |
-| `decode64(data)` | The bytes that `data` decodes to. |
-| `format(template, *args)` | A [runtime template](#runtime-templates). |
-| `csi` | `ESC [` |
-| `osc(code)` | `ESC ]`, the code (`Int32` or `String`), then `;` |
-| `apc` | `ESC _` |
-| `dcs` | `ESC P` |
-| `st` | `ESC \` |
-| `semi` | `;` |
+| Method                    | Writes                                                                                                                     |
+|---------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `byte(UInt8)`             | One byte.                                                                                                                  |
+| `char(Char)`              | The character as UTF-8.                                                                                                    |
+| `str(String)`             | The string's bytes.                                                                                                        |
+| `bytes(Bytes)`            | The slice. A `StaticArray(UInt8, N)` is accepted too.                                                                      |
+| `int(value)`              | Any integer from `Int8` to `UInt128`, in decimal.                                                                          |
+| `int2(Int32)`             | A value from 0 to 99, without the general digit count.                                                                     |
+| `int3(Int32)`             | A value from 0 to 999, without the general digit count.                                                                    |
+| `hex(value)`              | An unsigned integer in lowercase hexadecimal, without leading zeros.                                                       |
+| `hex2(UInt8)`             | Exactly two lowercase hexadecimal digits.                                                                                  |
+| `pad(value, width)`       | An integer, left-padded with zeros to `width` digits. A minus sign is written before the padding.                          |
+| `repeat(value, count)`    | A byte or a character `count` times. A count of zero or less writes nothing.                                               |
+| `put(value)`              | Any supported value, chosen by its type: integers, floats, `Bool`, `Char`, `String`, `Bytes`, `Nil`. `nil` writes nothing. |
+| `field(prefix, value)`    | `prefix` followed by `value`, or nothing at all when `value` is `nil`.                                                     |
+| `base64(data)`            | `Bytes` or a `String`, encoded with padding.                                                                               |
+| `decode64(data)`          | The bytes that `data` decodes to.                                                                                          |
+| `format(template, *args)` | A [runtime template](#runtime-templates).                                                                                  |
+| `csi`                     | `ESC [`                                                                                                                    |
+| `osc(code)`               | `ESC ]`, the code (`Int32` or `String`), then `;`                                                                          |
+| `apc`                     | `ESC _`                                                                                                                    |
+| `dcs`                     | `ESC P`                                                                                                                    |
+| `st`                      | `ESC \`                                                                                                                    |
+| `semi`                    | `;`                                                                                                                        |
 
 `int2` and `int3` trust their range. A value outside it writes wrong digits,
 but never more than two or three bytes and never outside the buffer.
@@ -510,19 +510,19 @@ What is the value?
 
 ### What each choice costs
 
-| Choice | Capacity checks | Other effects |
-|---|---|---|
-| `bbwrite` | One for the whole sequence. | Values and hint arguments are evaluated before anything is written. |
-| Hint with a fixed or computed size | None of its own; it is counted in the sequence's one check. | Tells the macro the type, so no dispatch on the value. |
-| Conditional branch | None of its own. | The condition is evaluated once; its outcome is checked when sizing and again when writing. A branch's values are evaluated only if it is taken. |
-| `each` loop | One per item, plus one for whatever follows the loop. | Cannot be used in `define` or in a conditional branch. |
-| Appender without size information | Its own, plus one for whatever follows it. | Cannot be used in `define` or in a conditional branch. |
-| `ByteBuilder.define` | One per call. Nested in another template, none of its own. | Adds a method to `ByteBuilder` for the whole program. |
-| Chained appends | One per append. | A possible call into the growth path on every append, which stops the compiler keeping the write position in a register across a loop. |
-| `reserve` then `unsafe_` appends | One, at the `reserve`. | Nothing protects you if the reservation is too small. |
-| Runtime template | One per `format` call. | Every argument is dispatched on its type at run time, twice: once to size it, once to write it. The slowest of the builder's own options. |
-| `b.io` | One per write. | Each write is a virtual call. Use it only to reach code that needs an `IO`. |
-| Interpolating into a `String`, then `str` | One. | Allocates the string and copies it. This is what `bbwrite` exists to avoid. |
+| Choice                                    | Capacity checks                                             | Other effects                                                                                                                                    |
+|-------------------------------------------|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `bbwrite`                                 | One for the whole sequence.                                 | Values and hint arguments are evaluated before anything is written.                                                                              |
+| Hint with a fixed or computed size        | None of its own; it is counted in the sequence's one check. | Tells the macro the type, so no dispatch on the value.                                                                                           |
+| Conditional branch                        | None of its own.                                            | The condition is evaluated once; its outcome is checked when sizing and again when writing. A branch's values are evaluated only if it is taken. |
+| `each` loop                               | One per item, plus one for whatever follows the loop.       | Cannot be used in `define` or in a conditional branch.                                                                                           |
+| Appender without size information         | Its own, plus one for whatever follows it.                  | Cannot be used in `define` or in a conditional branch.                                                                                           |
+| `ByteBuilder.define`                      | One per call. Nested in another template, none of its own.  | Adds a method to `ByteBuilder` for the whole program.                                                                                            |
+| Chained appends                           | One per append.                                             | A possible call into the growth path on every append, which stops the compiler keeping the write position in a register across a loop.           |
+| `reserve` then `unsafe_` appends          | One, at the `reserve`.                                      | Nothing protects you if the reservation is too small.                                                                                            |
+| Runtime template                          | One per `format` call.                                      | Every argument is dispatched on its type at run time, twice: once to size it, once to write it. The slowest of the builder's own options.        |
+| `b.io`                                    | One per write.                                              | Each write is a virtual call. Use it only to reach code that needs an `IO`.                                                                      |
+| Interpolating into a `String`, then `str` | One.                                                        | Allocates the string and copies it. This is what `bbwrite` exists to avoid.                                                                      |
 
 Effects that apply whichever way you write:
 
