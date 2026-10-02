@@ -10,7 +10,13 @@ class ByteBuilder
 
   BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".to_slice
 
-  MAX_DIGITS = 20
+  BASE64_PAIRS = Slice(UInt16).new(4096) do |value|
+    BASE64_CHARS[value >> 6].to_u16 | (BASE64_CHARS[value & 63].to_u16 << 8)
+  end
+
+  BILLION = 1_000_000_000_u64
+
+  alias Scalar = Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Char | String | Bytes
 
   private macro fixed(max, signature, &block)
     @[AlwaysInline]
@@ -23,6 +29,26 @@ class ByteBuilder
     @[AlwaysInline]
     def {{signature.name}}({{signature.args.splat}}) : self
       reserve({{max}})
+      unsafe_{{signature.name}}({{signature.args.map(&.var).splat}})
+    end
+  end
+
+  private macro sized(signature, bound, &block)
+    @[AlwaysInline]
+    def self.bound_{{signature.name}}({{signature.args.splat}}) : Int32
+      {{bound}}
+    end
+
+    @[AlwaysInline]
+    def unsafe_{{signature.name}}({{signature.args.splat}}) : self
+      {{block.body}}
+      self
+    end
+
+    @[::ByteBuilder::Appender(sized: true)]
+    @[AlwaysInline]
+    def {{signature.name}}({{signature.args.splat}}) : self
+      reserve(::ByteBuilder.bound_{{signature.name}}({{signature.args.map(&.var).splat}}))
       unsafe_{{signature.name}}({{signature.args.map(&.var).splat}})
     end
   end
@@ -181,35 +207,29 @@ class ByteBuilder
     @pos += 1
   end
 
-  @[AlwaysInline]
-  def unsafe_bytes(value : Bytes) : self
+  sized bytes(value : Bytes), value.size do
     value.copy_to(@buf + @pos, value.size)
     @pos += value.size
-    self
   end
 
-  @[Appender]
   @[AlwaysInline]
-  def bytes(value : Bytes) : self
-    reserve(value.size)
-    unsafe_bytes(value)
+  def self.bound_bytes(value : StaticArray(UInt8, N)) : Int32 forall N
+    N
   end
 
-  @[Appender]
+  @[AlwaysInline]
+  def unsafe_bytes(value : StaticArray(UInt8, N)) : self forall N
+    unsafe_bytes(value.to_slice)
+  end
+
+  @[Appender(sized: true)]
   @[AlwaysInline]
   def bytes(value : StaticArray(UInt8, N)) : self forall N
     bytes(value.to_slice)
   end
 
-  @[AlwaysInline]
-  def unsafe_str(value : String) : self
+  sized str(value : String), value.bytesize do
     unsafe_bytes(value.to_slice)
-  end
-
-  @[Appender]
-  @[AlwaysInline]
-  def str(value : String) : self
-    bytes(value.to_slice)
   end
 
   value Int8 | Int16 | Int32, int, 11
@@ -234,68 +254,87 @@ class ByteBuilder
     self
   end
 
-  @[Appender]
-  @[AlwaysInline]
-  def field(prefix : String, value : Nil) : self
-    self
+  sized field(prefix : String, value : Nil), 0 do
   end
 
-  @[Appender]
-  @[AlwaysInline]
-  def field(prefix : String, value) : self
-    reserve(prefix.bytesize + ByteBuilder.bound(value))
+  sized field(prefix : String, value : Scalar), prefix.bytesize + ::ByteBuilder.bound(value) do
     unsafe_str(prefix).unsafe_put(value)
   end
 
-  @[Appender]
-  @[AlwaysInline]
-  def osc(code : Int32) : self
-    reserve(14)
+  sized osc(code : Int32), 14 do
     unsafe_byte(0x1B_u8).unsafe_byte(0x5D_u8).unsafe_int(code).unsafe_semi
   end
 
-  @[Appender]
-  @[AlwaysInline]
-  def osc(code : String) : self
-    reserve(code.bytesize + 3)
+  sized osc(code : String), code.bytesize + 3 do
     unsafe_byte(0x1B_u8).unsafe_byte(0x5D_u8).unsafe_str(code).unsafe_semi
   end
 
-  @[Appender]
-  def base64(data : Bytes) : self
-    reserve((data.size + 2) // 3 * 4)
-    i = 0
-    while i + 2 < data.size
-      b0 = data.unsafe_fetch(i)
-      b1 = data.unsafe_fetch(i + 1)
-      b2 = data.unsafe_fetch(i + 2)
-      quad(
-        BASE64_CHARS.unsafe_fetch(b0 >> 2),
-        BASE64_CHARS.unsafe_fetch(((b0 & 0x03) << 4) | (b1 >> 4)),
-        BASE64_CHARS.unsafe_fetch(((b1 & 0x0F) << 2) | (b2 >> 6)),
-        BASE64_CHARS.unsafe_fetch(b2 & 0x3F))
+  @[AlwaysInline]
+  def self.bound_base64(data : Bytes) : Int32
+    (data.size + 2) // 3 * 4
+  end
+
+  @[AlwaysInline]
+  def self.bound_base64(data : String) : Int32
+    (data.bytesize + 2) // 3 * 4
+  end
+
+  def unsafe_base64(data : Bytes) : self
+    source = data.to_unsafe
+    size   = data.size
+    target = @buf + @pos
+    i      = 0
+    while i + 8 <= size
+      group = (source + i).as(Pointer(UInt64)).value.byte_swap
+      target.as(Pointer(UInt64)).value =
+        BASE64_PAIRS.unsafe_fetch(group >> 52).to_u64 |
+          (BASE64_PAIRS.unsafe_fetch((group >> 40) & 4095).to_u64 << 16) |
+          (BASE64_PAIRS.unsafe_fetch((group >> 28) & 4095).to_u64 << 32) |
+          (BASE64_PAIRS.unsafe_fetch((group >> 16) & 4095).to_u64 << 48)
+      target += 8
+      i += 6
+    end
+    while i + 3 <= size
+      b0 = source[i]
+      b1 = source[i + 1]
+      b2 = source[i + 2]
+      target.as(Pointer(UInt32)).value =
+        BASE64_PAIRS.unsafe_fetch((b0.to_u32 << 4) | (b1 >> 4)).to_u32 |
+          (BASE64_PAIRS.unsafe_fetch(((b1.to_u32 & 0x0F) << 8) | b2).to_u32 << 16)
+      target += 4
       i += 3
     end
-    case data.size - i
+    case size - i
     when 1
-      b0 = data.unsafe_fetch(i)
-      quad(
-        BASE64_CHARS.unsafe_fetch(b0 >> 2),
-        BASE64_CHARS.unsafe_fetch((b0 & 0x03) << 4),
-        0x3D_u8, 0x3D_u8)
+      b0 = source[i]
+      target.as(Pointer(UInt32)).value =
+        BASE64_PAIRS.unsafe_fetch(b0.to_u32 << 4).to_u32 | 0x3D3D_0000_u32
+      target += 4
     when 2
-      b0 = data.unsafe_fetch(i)
-      b1 = data.unsafe_fetch(i + 1)
-      quad(
-        BASE64_CHARS.unsafe_fetch(b0 >> 2),
-        BASE64_CHARS.unsafe_fetch(((b0 & 0x03) << 4) | (b1 >> 4)),
-        BASE64_CHARS.unsafe_fetch((b1 & 0x0F) << 2),
-        0x3D_u8)
+      b0 = source[i]
+      b1 = source[i + 1]
+      target.as(Pointer(UInt32)).value =
+        BASE64_PAIRS.unsafe_fetch((b0.to_u32 << 4) | (b1 >> 4)).to_u32 |
+          (BASE64_CHARS.unsafe_fetch((b1 & 0x0F) << 2).to_u32 << 16) | 0x3D00_0000_u32
+      target += 4
     end
+    @pos = (target - @buf).to_i32!
     self
   end
 
-  @[Appender]
+  @[AlwaysInline]
+  def unsafe_base64(data : String) : self
+    unsafe_base64(data.to_slice)
+  end
+
+  @[Appender(sized: true)]
+  @[AlwaysInline]
+  def base64(data : Bytes) : self
+    reserve(::ByteBuilder.bound_base64(data))
+    unsafe_base64(data)
+  end
+
+  @[Appender(sized: true)]
   @[AlwaysInline]
   def base64(data : String) : self
     base64(data.to_slice)
@@ -306,13 +345,6 @@ class ByteBuilder
     @buf[@pos] = first
     @buf[@pos + 1] = second
     @pos += 2
-  end
-
-  @[AlwaysInline]
-  private def quad(c0 : UInt8, c1 : UInt8, c2 : UInt8, c3 : UInt8) : Nil
-    (@buf + @pos).as(Pointer(UInt32)).value =
-      c0.to_u32 | (c1.to_u32 << 8) | (c2.to_u32 << 16) | (c3.to_u32 << 24)
-    @pos += 4
   end
 
   @[AlwaysInline]
@@ -351,28 +383,39 @@ class ByteBuilder
       digits32(value.to_u32!)
       return
     end
-    scratch = uninitialized UInt8[MAX_DIGITS]
-    digits = scratch.to_unsafe
-    index  = MAX_DIGITS
-    while value >= 100
-      pair = (value % 100).to_i32! * 2
-      value //= 100
-      index -= 2
-      digits[index] = DIGIT_PAIRS.unsafe_fetch(pair)
-      digits[index + 1] = DIGIT_PAIRS.unsafe_fetch(pair + 1)
-    end
-    if value >= 10
-      pair = value.to_i32! * 2
-      index -= 2
-      digits[index] = DIGIT_PAIRS.unsafe_fetch(pair)
-      digits[index + 1] = DIGIT_PAIRS.unsafe_fetch(pair + 1)
+    high = value // BILLION
+    low  = (value - high * BILLION).to_u32!
+    if high >= BILLION
+      top    = high // BILLION
+      middle = (high - top * BILLION).to_u32!
+      digits32(top.to_u32!)
+      digits9(middle)
     else
-      index -= 1
-      digits[index] = value.to_u8! + 48_u8
+      digits32(high.to_u32!)
     end
-    count = MAX_DIGITS - index
-    (digits + index).copy_to(@buf + @pos, count)
-    @pos += count
+    digits9(low)
+  end
+
+  @[AlwaysInline]
+  private def digits9(value : UInt32) : Nil
+    upper  = value // 10_000
+    lower  = value % 10_000
+    lead   = upper // 10_000
+    middle = upper % 10_000
+    @buf[@pos] = lead.to_u8! + 48_u8
+    digits4(@pos + 1, middle)
+    digits4(@pos + 5, lower)
+    @pos += 9
+  end
+
+  @[AlwaysInline]
+  private def digits4(index : Int32, value : UInt32) : Nil
+    first  = (value // 100) * 2
+    second = (value % 100) * 2
+    @buf[index] = DIGIT_PAIRS.unsafe_fetch(first)
+    @buf[index + 1] = DIGIT_PAIRS.unsafe_fetch(first + 1)
+    @buf[index + 2] = DIGIT_PAIRS.unsafe_fetch(second)
+    @buf[index + 3] = DIGIT_PAIRS.unsafe_fetch(second + 1)
   end
 
   @[NoInline]

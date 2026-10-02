@@ -85,6 +85,27 @@ describe "ByteBuilder.write" do
     text(builder).should eq("a=p,r=4,z=4,q=s!")
   end
 
+  it "evaluates the arguments of sized hints once and in order" do
+    builder = ByteBuilder.new(16)
+    calls   = [] of String
+    note    = ->(label : String) { calls << label; label }
+    bbwrite builder, "#{note.call("a")}#{str(note.call("b"))}#{field(note.call("c"), note.call("d"))}#{base64(note.call("e"))}"
+    calls.should eq(["a", "b", "c", "d", "e"])
+    text(builder).should eq("abcdZQ==")
+  end
+
+  it "reserves again after a defined template inside a template" do
+    builder = ByteBuilder.new(16)
+    long    = "y" * 3000
+    50.times do |n|
+      bbwrite builder, "#{long}#{move(n, n)}#{str(long)}#{field(";", long)}#{n}#{base64(long)}#{osc("7")}tail"
+    end
+    encoded  = Base64.strict_encode(long)
+    expected = (0...50).join { |n| "#{long}\e[#{n};#{n}H#{long};#{long}#{n}#{encoded}\e]7;tail" }
+    text(builder).should eq(expected)
+    builder.capacity.should be >= builder.pos
+  end
+
   it "stays within capacity when dynamic pieces precede fixed ones" do
     builder = ByteBuilder.new(16)
     long    = "x" * 5000

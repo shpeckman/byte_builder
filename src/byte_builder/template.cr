@@ -35,6 +35,9 @@ class ByteBuilder
         {% elsif overloads.all? { |method| method.annotation(::ByteBuilder::Appender)[:max] } %}
           {% kinds << 2 %}
           {% bounds << overloads.map { |method| method.annotation(::ByteBuilder::Appender)[:max] }.sort.last %}
+        {% elsif !piece.named_args && overloads.all? { |method| method.annotation(::ByteBuilder::Appender)[:sized] } %}
+          {% kinds << 4 %}
+          {% bounds << 0 %}
         {% else %}
           {% kinds << 3 %}
           {% bounds << 0 %}
@@ -49,9 +52,13 @@ class ByteBuilder
     {% for piece, index in pieces %}
       {% if kinds[index] == 1 %}
         %value{index} = {{piece}}
+      {% elsif kinds[index] == 4 %}
+        {% for arg, position in piece.args %}
+          %arg{index, position} = {{arg}}
+        {% end %}
       {% end %}
     {% end %}
-    %builder.reserve({{total}}{% for kind, index in kinds %}{% if kind == 1 %} + ::ByteBuilder.bound(%value{index}){% end %}{% end %})
+    %builder.reserve({{total}}{% for piece, index in pieces %}{% if kinds[index] == 1 %} + ::ByteBuilder.bound(%value{index}){% elsif kinds[index] == 4 %} + ::ByteBuilder.bound_{{piece.name}}({% for arg, position in piece.args %}%arg{index, position}, {% end %}){% end %}{% end %})
     {% for piece, index in pieces %}
       {% if kinds[index] == 0 %}
         {% if bounds[index] > 0 %}
@@ -61,13 +68,15 @@ class ByteBuilder
         %builder.unsafe_put(%value{index})
       {% elsif kinds[index] == 2 %}
         %builder.unsafe_{{piece.name}}({{piece.args.splat}})
+      {% elsif kinds[index] == 4 %}
+        %builder.unsafe_{{piece.name}}({% for arg, position in piece.args %}%arg{index, position}, {% end %})
       {% else %}
         {% rest = 0 %}
         {% for bound, later in bounds %}
           {% rest += bound if later > index %}
         {% end %}
         %builder.{{piece.name}}({{piece.args.splat}}{% if piece.named_args %}, {{piece.named_args.splat}}{% end %})
-        %builder.reserve({{rest}}{% for kind, later in kinds %}{% if kind == 1 && later > index %} + ::ByteBuilder.bound(%value{later}){% end %}{% end %})
+        %builder.reserve({{rest}}{% for other, later in pieces %}{% if later > index %}{% if kinds[later] == 1 %} + ::ByteBuilder.bound(%value{later}){% elsif kinds[later] == 4 %} + ::ByteBuilder.bound_{{other.name}}({% for arg, position in other.args %}%arg{later, position}, {% end %}){% end %}{% end %}{% end %})
       {% end %}
     {% end %}
     %builder

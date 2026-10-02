@@ -6,7 +6,8 @@ require "../src/byte_builder"
 module Bench
   WARMUP      = 500.milliseconds
   CALCULATION = 2.seconds
-  BATCH       = 256
+  BATCH       =  256
+  LARGE_BATCH = 4096
 
   class_property sink = 0_u64
 

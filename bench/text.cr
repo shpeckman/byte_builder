@@ -1,12 +1,12 @@
 # bench/text.cr
 require "./bench_helper"
 
-words  = Array.new(Bench::BATCH) { |i| "word-#{i}" * (i % 4 + 1) }
-chars  = Array.new(Bench::BATCH) { |i| {'a', 'é', '漢', '🎉'}[i % 4] }
-b      = ByteBuilder.new(1 << 16)
-memory = IO::Memory.new(1 << 16)
+words  = Array.new(Bench::LARGE_BATCH) { |i| "word-#{i}" * (i % 4 + 1) }
+chars  = Array.new(Bench::LARGE_BATCH) { |i| {'a', 'é', '漢', '🎉'}[i % 4] }
+b      = ByteBuilder.new(1 << 18)
+memory = IO::Memory.new(1 << 18)
 
-Bench.group("short strings, #{Bench::BATCH} per iteration") do |job|
+Bench.group("short strings, #{Bench::LARGE_BATCH} per iteration") do |job|
   job.report("IO::Memory <<") do
     memory.clear
     words.each { |word| memory << word }
@@ -24,7 +24,7 @@ Bench.group("short strings, #{Bench::BATCH} per iteration") do |job|
   end
 end
 
-Bench.group("characters of 1 to 4 bytes, #{Bench::BATCH} per iteration") do |job|
+Bench.group("characters of 1 to 4 bytes, #{Bench::LARGE_BATCH} per iteration") do |job|
   job.report("IO::Memory <<") do
     memory.clear
     chars.each { |char| memory << char }

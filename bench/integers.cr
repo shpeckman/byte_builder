@@ -1,13 +1,13 @@
 # bench/integers.cr
 require "./bench_helper"
 
-small  = Array.new(Bench::BATCH) { |i| (i * 7) % 256 }
-mixed  = Array.new(Bench::BATCH) { |i| (i &* 2_654_435_761_u32.to_i32!) >> (i % 24) }
-wide   = Array.new(Bench::BATCH) { |i| (i.to_u64 + 1) &* 72_057_594_037_927_931_u64 }
-b      = ByteBuilder.new(1 << 16)
-memory = IO::Memory.new(1 << 16)
+small  = Array.new(Bench::LARGE_BATCH) { |i| (i * 7) % 256 }
+mixed  = Array.new(Bench::LARGE_BATCH) { |i| (i &* 2_654_435_761_u32.to_i32!) >> (i % 24) }
+wide   = Array.new(Bench::LARGE_BATCH) { |i| (i.to_u64 + 1) &* 72_057_594_037_927_931_u64 }
+b      = ByteBuilder.new(1 << 18)
+memory = IO::Memory.new(1 << 18)
 
-Bench.group("integers 0..255, #{Bench::BATCH} per iteration") do |job|
+Bench.group("integers 0..255, #{Bench::LARGE_BATCH} per iteration") do |job|
   job.report("IO::Memory <<") do
     memory.clear
     small.each { |n| memory << n }
@@ -31,7 +31,7 @@ Bench.group("integers 0..255, #{Bench::BATCH} per iteration") do |job|
   end
 end
 
-Bench.group("signed 32-bit integers of mixed length, #{Bench::BATCH} per iteration") do |job|
+Bench.group("signed 32-bit integers of mixed length, #{Bench::LARGE_BATCH} per iteration") do |job|
   job.report("IO::Memory <<") do
     memory.clear
     mixed.each { |n| memory << n }
@@ -44,7 +44,7 @@ Bench.group("signed 32-bit integers of mixed length, #{Bench::BATCH} per iterati
   end
 end
 
-Bench.group("unsigned 64-bit integers, #{Bench::BATCH} per iteration") do |job|
+Bench.group("unsigned 64-bit integers, #{Bench::LARGE_BATCH} per iteration") do |job|
   job.report("IO::Memory <<") do
     memory.clear
     wide.each { |n| memory << n }

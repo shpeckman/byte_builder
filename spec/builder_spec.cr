@@ -21,6 +21,26 @@ describe ByteBuilder do
     text(builder).should eq("#{UInt32::MAX};#{UInt64::MAX};#{Int64::MIN};7;-128;4294967296;-4294967295;10000000000")
   end
 
+  it "encodes 64-bit integers around every chunk boundary" do
+    builder = ByteBuilder.new
+    edges = [UInt32::MAX.to_u64, UInt32::MAX.to_u64 + 1, 999_999_999_u64, 1_000_000_000_u64,
+             1_000_000_001_u64, 9_999_999_999_u64, 999_999_999_999_999_999_u64,
+             1_000_000_000_000_000_000_u64, 1_000_000_000_000_000_001_u64,
+             10_000_000_000_000_000_000_u64, 10_000_000_090_000_000_005_u64, UInt64::MAX]
+    edges.each do |n|
+      builder.reset
+      builder.int(n)
+      text(builder).should eq(n.to_s)
+    end
+    random = Random.new(42)
+    2000.times do
+      n = random.next_u.to_u64 &* random.next_u.to_u64 >> random.rand(40)
+      builder.reset
+      builder.int(n).semi.int(n.to_i64!)
+      text(builder).should eq("#{n};#{n.to_i64!}")
+    end
+  end
+
   it "encodes the two and three digit fast paths" do
     builder = ByteBuilder.new
     100.times { |n| builder.int2(n).semi }
@@ -81,6 +101,13 @@ describe ByteBuilder do
       builder.reset
       builder.base64(data)
       text(builder).should eq(Base64.strict_encode(data))
+    end
+    random = Random.new(7)
+    200.times do
+      data = random.random_bytes(random.rand(600))
+      builder.reset
+      builder.str("ab").base64(data)
+      text(builder).should eq("ab" + Base64.strict_encode(data))
     end
     builder.reset
     builder.base64("hello")
