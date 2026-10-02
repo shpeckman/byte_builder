@@ -499,13 +499,13 @@ Inside any template, pick how a value is written:
 ```
 What is the value?
 │
-├─╴An integer known to be 0..99 or 0..999      → int2 / int3 hint
-├─╴A byte that must be two hex digits          → hex2 hint
-├─╴An integer that needs leading zeros         → pad hint
-├─╴Binary data for a text protocol             → base64 hint
-├─╴Text or a number, written as it is          → no hint: #{value}
-├─╴Something with its own to_s(io) only        → value.to_s(b.io), outside the template
-╰─╴A payload too large for one packet          → ByteBuilder.base64_chunks around a bbwrite
+├╴An integer known to be 0..99 or 0..999      → int2 / int3 hint
+├╴A byte that must be two hex digits          → hex2 hint
+├╴An integer that needs leading zeros         → pad hint
+├╴Binary data for a text protocol             → base64 hint
+├╴Text or a number, written as it is          → no hint: #{value}
+├╴Something with its own to_s(io) only        → value.to_s(b.io), outside the template
+╰╴A payload too large for one packet          → ByteBuilder.base64_chunks around a bbwrite
 ```
 
 ### What each choice costs
