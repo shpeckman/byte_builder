@@ -453,46 +453,45 @@ Start from the shape of what you are writing.
 ```
 Is the text of the sequence written in your source code?
 │
-├─╴No, it arrives at run time (configuration, user input)
-│  ╰─╴ByteBuilder::Template with b.format
+├╴No, it arrives at run time (configuration, user input)
+│ ╰╴ByteBuilder::Template with b.format
 │
-╰─╴Yes
-   │
-   ├─╴Is its shape fixed, apart from the values?
-   │  │
-   │  ├─╴Yes, and it is used in one place
-   │  │  ╰─╴bbwrite
-   │  │
-   │  ╰─╴Yes, and it is used in several places
-   │     ╰─╴ByteBuilder.define, then call it or use it as a hint
-   │
-   ├─╴Are some parts present only sometimes?
-   │  │
-   │  ├─╴One value that may be nil, with a fixed prefix
-   │  │  ╰─╴field hint:            #{field(",c=", columns)}
-   │  │
-   │  ╰─╴Anything else that depends on a condition
-   │     ╰─╴conditional branch:    #{",c=#{columns}" if columns}
-   │
-   ├─╴Is a part repeated once per item?
-   │  │
-   │  ├─╴Every item is written the same way
-   │  │  ╰─╴each loop:             #{each(items, ' ') { |item| "#{item}" }}
-   │  │
-   │  ╰─╴Items differ by position, the loop exits early,
-   │     or it sits inside a define or a conditional branch
-   │     ╰─╴chained appends in an ordinary loop
-   │
-   ╰─╴Is it one byte, character or number at a time in a tight loop?
-      │
-      ├─╴The same byte or character many times
-      │  ╰─╴repeat
-      │
-      ├─╴You can bound the total size before the loop
-      │  ╰─╴reserve once, then the unsafe_ appenders
-      │
-      ╰─╴Otherwise
-         ╰─╴the checked appenders
+╰╴Yes
+  │
+  ├╴Is its shape fixed, apart from the values?
+  │ │
+  │ ├╴Yes, and it is used in one place
+  │ │ ╰╴bbwrite
+  │ │
+  │ ╰╴Yes, and it is used in several places
+  │   ╰╴ByteBuilder.define, then call it or use it as a hint
+  │
+  ├╴Are some parts present only sometimes?
+  │ │
+  │ ├╴One value that may be nil, with a fixed prefix
+  │ │ ╰╴field hint:            #{field(",c=", columns)}
+  │ │
+  │ ╰╴Anything else that depends on a condition
+  │   ╰╴conditional branch:    #{",c=#{columns}" if columns}
+  │
+  ├╴Is a part repeated once per item?
+  │ │
+  │ ├╴Every item is written the same way
+  │ │ ╰╴each loop:             #{each(items, ' ') { |item| "#{item}" }}
+  │ │
+  │ ╰╴Items differ by position, the loop exits early, or it sits inside a define or a conditional branch
+  │   ╰╴chained appends in an ordinary loop
+  │
+  ╰╴Is it one byte, character or number at a time in a tight loop?
+    │
+    ├╴The same byte or character many times
+    │ ╰╴repeat
+    │
+    ├╴You can bound the total size before the loop
+    │ ╰╴reserve once, then the unsafe_ appenders
+    │
+    ╰╴Otherwise
+      ╰╴the checked appenders
 ```
 
 Inside any template, pick how a value is written:
