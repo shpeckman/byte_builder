@@ -24,22 +24,25 @@ Bench.group("short strings, #{Bench::LARGE_BATCH} per iteration") do |job|
   end
 end
 
-Bench.group("characters of 1 to 4 bytes, #{Bench::LARGE_BATCH} per iteration") do |job|
-  job.report("IO::Memory <<") do
-    memory.clear
-    chars.each { |char| memory << char }
-    Bench.keep(memory)
-  end
-  job.report("char") do
-    b.reset
-    chars.each { |char| b.char(char) }
-    Bench.keep(b)
-  end
-  job.report("reserve + unsafe_char") do
-    b.reset
-    b.reserve(chars.size * 4)
-    chars.each { |char| b.unsafe_char(char) }
-    Bench.keep(b)
+{Bench::BATCH, Bench::LARGE_BATCH}.each do |count|
+  batch = chars.first(count)
+  Bench.group("characters of 1 to 4 bytes, #{count} per iteration") do |job|
+    job.report("IO::Memory <<") do
+      memory.clear
+      batch.each { |char| memory << char }
+      Bench.keep(memory)
+    end
+    job.report("char") do
+      b.reset
+      batch.each { |char| b.char(char) }
+      Bench.keep(b)
+    end
+    job.report("reserve + unsafe_char") do
+      b.reset
+      b.reserve(batch.size * 4)
+      batch.each { |char| b.unsafe_char(char) }
+      Bench.keep(b)
+    end
   end
 end
 

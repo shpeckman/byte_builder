@@ -254,7 +254,20 @@ class ByteBuilder
     self
   end
 
-  sized field(prefix : String, value : Nil), 0 do
+  @[AlwaysInline]
+  def self.bound_field(prefix : String, value : Nil) : Int32
+    0
+  end
+
+  @[AlwaysInline]
+  def unsafe_field(prefix : String, value : Nil) : self
+    self
+  end
+
+  @[Appender(sized: true)]
+  @[AlwaysInline]
+  def field(prefix : String, value : Nil) : self
+    self
   end
 
   sized field(prefix : String, value : Scalar), prefix.bytesize + ::ByteBuilder.bound(value) do
