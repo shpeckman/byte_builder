@@ -3,20 +3,22 @@ class ByteBuilder
   annotation Appender
   end
 
-  DIGIT_PAIRS = Bytes.new(200) do |i|
-    number = i // 2
+  MAX_CAPACITY = Int32::MAX
+  FLOAT_BOUND  = 32
+
+  DIGIT_PAIRS = Bytes.new(256) do |i|
+    number = i < 200 ? i // 2 : 0
     (i.even? ? number // 10 : number % 10).to_u8 + 48_u8
   end
 
-  BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".to_slice
+  HEX_DIGITS = "0123456789abcdef".to_slice
 
-  BASE64_PAIRS = Slice(UInt16).new(4096) do |value|
-    BASE64_CHARS[value >> 6].to_u16 | (BASE64_CHARS[value & 63].to_u16 << 8)
-  end
+  BILLION     =              1_000_000_000_u64
+  TEN_POW_19  = 10_000_000_000_000_000_000_u64
+  QUINTILLION =  1_000_000_000_000_000_000_u64
 
-  BILLION = 1_000_000_000_u64
-
-  alias Scalar = Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 | Char | String | Bytes
+  alias Integer = Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64
+  alias Scalar = Integer | Int128 | UInt128 | Float32 | Float64 | Bool | Char | String | Bytes
 
   private macro fixed(max, signature, &block)
     @[AlwaysInline]
@@ -53,31 +55,57 @@ class ByteBuilder
     end
   end
 
-  private macro value(type, appender, bound)
+  private macro value(type, bound, &block)
     @[AlwaysInline]
     def self.bound(value : {{type}}) : Int32
       {{bound}}
     end
 
     @[AlwaysInline]
-    def put(value : {{type}}) : self
-      {{appender.id}}(value)
+    def unsafe_put(value : {{type}}) : self
+      {{block.body}}
+      self
     end
 
     @[AlwaysInline]
-    def unsafe_put(value : {{type}}) : self
-      unsafe_{{appender.id}}(value)
+    def put(value : {{type}}) : self
+      reserve(::ByteBuilder.bound(value))
+      unsafe_put(value)
+    end
+  end
+
+  private macro fallback(method, result)
+    @[AlwaysInline]
+    def {{method}}(value : T) : {{result}} forall T
+      \{% if T.union? %}
+        case value
+        \{% for type in T.union_types %}
+          when \{{type}} then {{method}}(value)
+        \{% end %}
+        else raise "unreachable"
+        end
+      \{% else %}
+        \{% raise "ByteBuilder cannot write a value of type #{T}: supported types are integers, floats, Bool, Char, String, Bytes and Nil. Convert it first, for example with #to_s." %}
+      \{% end %}
     end
   end
 
   @buf : Pointer(UInt8)
   @pos : Int32
   @cap : Int32
+  @io  : Sink?
 
   def initialize(capacity : Int32 = 4096)
     @cap = Math.max(capacity, 16)
     @buf = Pointer(UInt8).malloc(@cap)
     @pos = 0
+    @io  = nil
+  end
+
+  @[AlwaysInline]
+  def self.bind(builder : ByteBuilder, values : Tuple, &) : ByteBuilder
+    yield builder, values
+    builder
   end
 
   @[AlwaysInline]
@@ -116,21 +144,35 @@ class ByteBuilder
     self
   end
 
+  def truncate(position : Int32) : self
+    unless 0 <= position <= @pos
+      raise ArgumentError.new("cannot truncate to #{position}: #{@pos} bytes written")
+    end
+    @pos = position
+    self
+  end
+
+  def shrink(capacity : Int32 = 4096) : self
+    target = Math.max(Math.max(capacity, @pos), 16)
+    if target < @cap
+      @buf = @buf.realloc(target)
+      @cap = target
+    end
+    self
+  end
+
   fixed 1, byte(value : UInt8) do
     @buf[@pos] = value
     @pos += 1
   end
 
   fixed 4, char(value : Char) do
-    code = value.ord
+    code = value.ord.to_u32!
     if code < 0x80
       @buf[@pos] = code.to_u8!
       @pos += 1
     else
-      value.each_byte do |byte|
-        @buf[@pos] = byte
-        @pos += 1
-      end
+      @pos += encode(code, @buf + @pos)
     end
   end
 
@@ -162,12 +204,26 @@ class ByteBuilder
     digits64(value)
   end
 
+  fixed 40, int(value : Int128) do
+    magnitude = value.to_u128!
+    if value < 0
+      @buf[@pos] = 45_u8
+      @pos += 1
+      magnitude = 0_u128 &- magnitude
+    end
+    digits128(magnitude)
+  end
+
+  fixed 39, int(value : UInt128) do
+    digits128(value)
+  end
+
   fixed 2, int2(value : Int32) do
     if value < 10
-      @buf[@pos] = value.to_u8! + 48_u8
+      @buf[@pos] = value.to_u8! &+ 48_u8
       @pos += 1
     else
-      pair = value * 2
+      pair = (value &* 2) & 0xFE
       @buf[@pos] = DIGIT_PAIRS.unsafe_fetch(pair)
       @buf[@pos + 1] = DIGIT_PAIRS.unsafe_fetch(pair + 1)
       @pos += 2
@@ -179,11 +235,29 @@ class ByteBuilder
       unsafe_int2(value)
     else
       pair = (value % 100) * 2
-      @buf[@pos] = (value // 100).to_u8! + 48_u8
+      @buf[@pos] = (value // 100).to_u8! &+ 48_u8
       @buf[@pos + 1] = DIGIT_PAIRS.unsafe_fetch(pair)
       @buf[@pos + 2] = DIGIT_PAIRS.unsafe_fetch(pair + 1)
       @pos += 3
     end
+  end
+
+  fixed 2, hex2(value : UInt8) do
+    @buf[@pos] = HEX_DIGITS.unsafe_fetch(value >> 4)
+    @buf[@pos + 1] = HEX_DIGITS.unsafe_fetch(value & 0x0F)
+    @pos += 2
+  end
+
+  fixed 16, hex(value : UInt8 | UInt16 | UInt32 | UInt64) do
+    bits  = value.to_u64!
+    count = bits == 0 ? 1 : (67 - bits.leading_zeros_count) // 4
+    index = @pos + count
+    count.times do
+      index -= 1
+      @buf[index] = HEX_DIGITS.unsafe_fetch(bits & 0x0F)
+      bits >>= 4
+    end
+    @pos += count
   end
 
   fixed 2, csi do
@@ -232,27 +306,97 @@ class ByteBuilder
     unsafe_bytes(value.to_slice)
   end
 
-  value Int8 | Int16 | Int32, int, 11
-  value UInt8 | UInt16 | UInt32, int, 10
-  value Int64 | UInt64, int, 20
-  value Char, char, 4
-  value String, str, value.bytesize
-  value Bytes, bytes, value.size
-
-  @[AlwaysInline]
-  def self.bound(value : Nil) : Int32
-    0
+  sized repeat(value : UInt8, count : Int32), Math.max(count, 0) do
+    if count > 0
+      Slice.new(@buf + @pos, count).fill(value)
+      @pos += count
+    end
   end
 
-  @[AlwaysInline]
-  def put(value : Nil) : self
-    self
+  sized repeat(value : Char, count : Int32), Math.max(count, 0) * 4 do
+    code = value.ord.to_u32!
+    if code < 0x80
+      unsafe_repeat(code.to_u8!, count)
+    elsif count > 0
+      first  = @buf + @pos
+      length = encode(code, first)
+      total  = length * count
+      filled = length
+      while filled < total
+        step = Math.min(filled, total - filled)
+        first.copy_to(first + filled, step)
+        filled += step
+      end
+      @pos += total
+    end
   end
 
-  @[AlwaysInline]
-  def unsafe_put(value : Nil) : self
-    self
+  sized pad(value : Integer, width : Int32), Math.max(width, 0) + 21 do
+    magnitude = value.to_u64!
+    if value < 0
+      @buf[@pos] = 45_u8
+      @pos += 1
+      magnitude = 0_u64 &- magnitude
+    end
+    start = @pos
+    digits64(magnitude)
+    length = @pos - start
+    if length < width
+      shift = width - length
+      (@buf + start).move_to(@buf + start + shift, length)
+      Slice.new(@buf + start, shift).fill(48_u8)
+      @pos += shift
+    end
   end
+
+  value Int8 | Int16 | Int32, 11 do
+    unsafe_int(value)
+  end
+
+  value UInt8 | UInt16 | UInt32, 10 do
+    unsafe_int(value)
+  end
+
+  value Int64 | UInt64, 20 do
+    unsafe_int(value)
+  end
+
+  value Int128 | UInt128, 40 do
+    unsafe_int(value)
+  end
+
+  value Char, 4 do
+    unsafe_char(value)
+  end
+
+  value String, value.bytesize do
+    unsafe_str(value)
+  end
+
+  value Bytes, value.size do
+    unsafe_bytes(value)
+  end
+
+  value Bool, 5 do
+    unsafe_str(value ? "true" : "false")
+  end
+
+  value Float32 | Float64, FLOAT_BOUND do
+    start = @pos
+    value.to_s(io)
+    if @pos - start > FLOAT_BOUND
+      raise ArgumentError.new("float text exceeded #{FLOAT_BOUND} bytes")
+    end
+  end
+
+  value Nil, 0 do
+  end
+
+  fallback self.bound, Int32
+
+  fallback unsafe_put, self
+
+  fallback put, self
 
   @[AlwaysInline]
   def self.bound_field(prefix : String, value : Nil) : Int32
@@ -283,81 +427,30 @@ class ByteBuilder
   end
 
   @[AlwaysInline]
-  def self.bound_base64(data : Bytes) : Int32
-    (data.size + 2) // 3 * 4
-  end
-
-  @[AlwaysInline]
-  def self.bound_base64(data : String) : Int32
-    (data.bytesize + 2) // 3 * 4
-  end
-
-  def unsafe_base64(data : Bytes) : self
-    source = data.to_unsafe
-    size   = data.size
-    target = @buf + @pos
-    i      = 0
-    while i + 8 <= size
-      group = (source + i).as(Pointer(UInt64)).value.byte_swap
-      target.as(Pointer(UInt64)).value =
-        BASE64_PAIRS.unsafe_fetch(group >> 52).to_u64 |
-          (BASE64_PAIRS.unsafe_fetch((group >> 40) & 4095).to_u64 << 16) |
-          (BASE64_PAIRS.unsafe_fetch((group >> 28) & 4095).to_u64 << 32) |
-          (BASE64_PAIRS.unsafe_fetch((group >> 16) & 4095).to_u64 << 48)
-      target += 8
-      i += 6
-    end
-    while i + 3 <= size
-      b0 = source[i]
-      b1 = source[i + 1]
-      b2 = source[i + 2]
-      target.as(Pointer(UInt32)).value =
-        BASE64_PAIRS.unsafe_fetch((b0.to_u32 << 4) | (b1 >> 4)).to_u32 |
-          (BASE64_PAIRS.unsafe_fetch(((b1.to_u32 & 0x0F) << 8) | b2).to_u32 << 16)
-      target += 4
-      i += 3
-    end
-    case size - i
-    when 1
-      b0 = source[i]
-      target.as(Pointer(UInt32)).value =
-        BASE64_PAIRS.unsafe_fetch(b0.to_u32 << 4).to_u32 | 0x3D3D_0000_u32
-      target += 4
-    when 2
-      b0 = source[i]
-      b1 = source[i + 1]
-      target.as(Pointer(UInt32)).value =
-        BASE64_PAIRS.unsafe_fetch((b0.to_u32 << 4) | (b1 >> 4)).to_u32 |
-          (BASE64_CHARS.unsafe_fetch((b1 & 0x0F) << 2).to_u32 << 16) | 0x3D00_0000_u32
-      target += 4
-    end
-    @pos = (target - @buf).to_i32!
-    self
-  end
-
-  @[AlwaysInline]
-  def unsafe_base64(data : String) : self
-    unsafe_base64(data.to_slice)
-  end
-
-  @[Appender(sized: true)]
-  @[AlwaysInline]
-  def base64(data : Bytes) : self
-    reserve(::ByteBuilder.bound_base64(data))
-    unsafe_base64(data)
-  end
-
-  @[Appender(sized: true)]
-  @[AlwaysInline]
-  def base64(data : String) : self
-    base64(data.to_slice)
-  end
-
-  @[AlwaysInline]
   private def pair(first : UInt8, second : UInt8) : Nil
     @buf[@pos] = first
     @buf[@pos + 1] = second
     @pos += 2
+  end
+
+  @[AlwaysInline]
+  private def encode(code : UInt32, target : Pointer(UInt8)) : Int32
+    if code < 0x800
+      target[0] = (0xC0_u32 | (code >> 6)).to_u8!
+      target[1] = (0x80_u32 | (code & 0x3F)).to_u8!
+      2
+    elsif code < 0x10000
+      target[0] = (0xE0_u32 | (code >> 12)).to_u8!
+      target[1] = (0x80_u32 | ((code >> 6) & 0x3F)).to_u8!
+      target[2] = (0x80_u32 | (code & 0x3F)).to_u8!
+      3
+    else
+      target[0] = (0xF0_u32 | (code >> 18)).to_u8!
+      target[1] = (0x80_u32 | ((code >> 12) & 0x3F)).to_u8!
+      target[2] = (0x80_u32 | ((code >> 6) & 0x3F)).to_u8!
+      target[3] = (0x80_u32 | (code & 0x3F)).to_u8!
+      4
+    end
   end
 
   @[AlwaysInline]
@@ -409,6 +502,22 @@ class ByteBuilder
     digits9(low)
   end
 
+  private def digits128(value : UInt128) : Nil
+    if value <= UInt64::MAX
+      digits64(value.to_u64!)
+      return
+    end
+    high = value // TEN_POW_19
+    low  = (value - high * TEN_POW_19).to_u64!
+    digits128(high)
+    lead = low // QUINTILLION
+    rest = low - lead * QUINTILLION
+    @buf[@pos] = lead.to_u8! + 48_u8
+    @pos += 1
+    digits9((rest // BILLION).to_u32!)
+    digits9((rest % BILLION).to_u32!)
+  end
+
   @[AlwaysInline]
   private def digits9(value : UInt32) : Nil
     upper  = value // 10_000
@@ -433,12 +542,16 @@ class ByteBuilder
 
   @[NoInline]
   private def grow(count : Int32) : Nil
-    needed   = @pos + count
-    capacity = @cap
+    needed = @pos.to_i64 + count
+    if needed > MAX_CAPACITY
+      raise ArgumentError.new("ByteBuilder cannot hold #{needed} bytes: the limit is #{MAX_CAPACITY}")
+    end
+    capacity = @cap.to_i64
     while capacity < needed
       capacity *= 2
     end
-    @buf = @buf.realloc(capacity)
-    @cap = capacity
+    capacity = MAX_CAPACITY.to_i64 if capacity > MAX_CAPACITY
+    @buf     = @buf.realloc(capacity.to_i32)
+    @cap     = capacity.to_i32
   end
 end

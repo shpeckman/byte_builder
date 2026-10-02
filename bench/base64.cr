@@ -21,4 +21,15 @@ memory = IO::Memory.new(1 << 16)
       Bench.keep(b)
     end
   end
+  encoded = Base64.strict_encode(data)
+  Bench.group("base64 decoding of #{size} bytes") do |job|
+    job.report("Base64.decode to Bytes") do
+      Bench.sink &+= Base64.decode(encoded).size
+    end
+    job.report("decode64") do
+      b.reset
+      b.decode64(encoded)
+      Bench.keep(b)
+    end
+  end
 end

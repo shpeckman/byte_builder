@@ -3,6 +3,10 @@ require "./bench_helper"
 
 ByteBuilder.define bench_cell(row, col, r, name), "\e[#{row};#{col}H\e[38;2;#{int3(r)};#{int3(r)};#{int3(r)}m#{name}"
 
+ByteBuilder.define bench_move(row, col), "\e[#{row};#{col}H"
+
+CELL_TEMPLATE = ByteBuilder::Template.new("\e[{0};{1}H\e[38;2;{2:int3};{2:int3};{2:int3}m{3}")
+
 rows   = Array.new(Bench::BATCH * 2) { |i| (i * 7) % 200 + 1 }
 name   = "label"
 absent = nil.as(Int32?)
@@ -66,6 +70,25 @@ Bench.group("cursor move and rgb colour, #{Bench::BATCH} per iteration") do |job
       row = rows.unsafe_fetch(i)
       col = rows.unsafe_fetch(i + Bench::BATCH)
       b.bench_cell(row, col, col & 255, name)
+    end
+    Bench.keep(b)
+  end
+  job.report("bbwrite nesting a defined template") do
+    b.reset
+    Bench::BATCH.times do |i|
+      row = rows.unsafe_fetch(i)
+      col = rows.unsafe_fetch(i + Bench::BATCH)
+      r   = col & 255
+      bbwrite b, "#{bench_move(row, col)}\e[38;2;#{int3(r)};#{int3(r)};#{int3(r)}m#{name}"
+    end
+    Bench.keep(b)
+  end
+  job.report("runtime template") do
+    b.reset
+    Bench::BATCH.times do |i|
+      row = rows.unsafe_fetch(i)
+      col = rows.unsafe_fetch(i + Bench::BATCH)
+      b.format(CELL_TEMPLATE, row, col, col & 255, name)
     end
     Bench.keep(b)
   end

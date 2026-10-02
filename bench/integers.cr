@@ -56,3 +56,40 @@ Bench.group("unsigned 64-bit integers, #{Bench::LARGE_BATCH} per iteration") do 
     Bench.keep(b)
   end
 end
+
+Bench.group("hexadecimal and zero-padded integers, #{Bench::LARGE_BATCH} per iteration") do |job|
+  job.report("IO::Memory << to_s(16)") do
+    memory.clear
+    mixed.each { |n| n.to_u32!.to_s(memory, 16) }
+    Bench.keep(memory)
+  end
+  job.report("hex") do
+    b.reset
+    mixed.each { |n| b.hex(n.to_u32!) }
+    Bench.keep(b)
+  end
+  job.report("IO::Memory << to_s(precision: 3)") do
+    memory.clear
+    small.each { |n| n.to_s(memory, precision: 3) }
+    Bench.keep(memory)
+  end
+  job.report("pad to 3") do
+    b.reset
+    small.each { |n| b.pad(n, 3) }
+    Bench.keep(b)
+  end
+end
+
+Bench.group("64-bit floats, #{Bench::LARGE_BATCH} per iteration") do |job|
+  floats = Array.new(Bench::LARGE_BATCH) { |i| (i + 1) * 1.0625 / 7 }
+  job.report("IO::Memory <<") do
+    memory.clear
+    floats.each { |n| memory << n }
+    Bench.keep(memory)
+  end
+  job.report("put") do
+    b.reset
+    floats.each { |n| b.put(n) }
+    Bench.keep(b)
+  end
+end

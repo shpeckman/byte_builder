@@ -46,6 +46,29 @@ end
   end
 end
 
+Bench.group("runs of 80 repeated characters, #{Bench::BATCH} per iteration") do |job|
+  job.report("IO::Memory << ' ' * 80") do
+    memory.clear
+    Bench::BATCH.times { 80.times { memory << ' ' } }
+    Bench.keep(memory)
+  end
+  job.report("repeat ascii") do
+    b.reset
+    Bench::BATCH.times { b.repeat(' ', 80) }
+    Bench.keep(b)
+  end
+  job.report("IO::Memory << '─' * 80") do
+    memory.clear
+    Bench::BATCH.times { 80.times { memory << '─' } }
+    Bench.keep(memory)
+  end
+  job.report("repeat multi-byte") do
+    b.reset
+    Bench::BATCH.times { b.repeat('─', 80) }
+    Bench.keep(b)
+  end
+end
+
 Bench.group("growth from 16 bytes to 1 MiB") do |job|
   chunk = ("x" * 64).to_slice
   job.report("IO::Memory") do

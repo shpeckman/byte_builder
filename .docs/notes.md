@@ -185,3 +185,99 @@ base64 of 1048576 bytes
 Base64.strict_encode to IO::Memory 209.49  (  4.77ms) (± 0.64%)    0.0B/op  22.99× slower
                             base64   4.82k (207.63µs) (± 0.62%)    0.0B/op        fastest
 ```
+
+```
+> crystal build --release --no-debug --progress bench/all.cr -o bench_opt_round_03
+> ./bench_opt_round_03
+
+integers 0..255, 4096 per iteration
+        IO::Memory <<  28.22k ( 35.43µs) (±15.96%)  0.0B/op   4.98× slower
+                  int  87.81k ( 11.39µs) (± 2.97%)  0.0B/op   1.60× slower
+                 int3 125.46k (  7.97µs) (± 4.26%)  0.0B/op   1.12× slower
+reserve + unsafe_int3 140.58k (  7.11µs) (±16.62%)  0.0B/op        fastest
+
+signed 32-bit integers of mixed length, 4096 per iteration
+IO::Memory <<  18.53k ( 53.98µs) (± 9.29%)  0.0B/op   2.75× slower
+          int  50.95k ( 19.63µs) (± 1.58%)  0.0B/op        fastest
+
+unsigned 64-bit integers, 4096 per iteration
+IO::Memory <<  11.40k ( 87.69µs) (±13.83%)  0.0B/op   1.86× slower
+          int  21.16k ( 47.25µs) (± 2.17%)  0.0B/op        fastest
+
+hexadecimal and zero-padded integers, 4096 per iteration
+          IO::Memory << to_s(16)  25.49k ( 39.23µs) (±13.67%)  0.0B/op   1.90× slower
+                             hex  48.48k ( 20.63µs) (±22.75%)  0.0B/op        fastest
+IO::Memory << to_s(precision: 3)  23.16k ( 43.18µs) (±22.44%)  0.0B/op   2.09× slower
+                        pad to 3  45.20k ( 22.12µs) (± 2.46%)  0.0B/op   1.07× slower
+
+64-bit floats, 4096 per iteration
+IO::Memory <<   4.70k (212.98µs) (± 2.88%)  0.0B/op   1.06× slower
+          put   4.97k (201.37µs) (± 2.46%)  0.0B/op        fastest
+
+short strings, 4096 per iteration
+IO::Memory <<  53.23k ( 18.79µs) (± 1.73%)  0.0B/op   2.12× slower
+          str 112.67k (  8.88µs) (± 2.55%)  0.0B/op        fastest
+        bytes 102.52k (  9.75µs) (±14.81%)  0.0B/op   1.10× slower
+
+characters of 1 to 4 bytes, 256 per iteration
+        IO::Memory << 529.68k (  1.89µs) (±26.11%)  0.0B/op   4.55× slower
+                 char   2.41M (414.65ns) (± 3.19%)  0.0B/op        fastest
+reserve + unsafe_char   2.21M (452.23ns) (±21.82%)  0.0B/op   1.09× slower
+
+characters of 1 to 4 bytes, 4096 per iteration
+        IO::Memory <<  39.47k ( 25.34µs) (± 5.14%)  0.0B/op   2.83× slower
+                 char 111.66k (  8.96µs) (±13.00%)  0.0B/op        fastest
+reserve + unsafe_char  88.14k ( 11.35µs) (± 5.95%)  0.0B/op   1.27× slower
+
+runs of 80 repeated characters, 256 per iteration
+IO::Memory << ' ' * 80  16.04k ( 62.36µs) (±16.97%)  0.0B/op   80.06× slower
+          repeat ascii   1.28M (778.87ns) (± 1.64%)  0.0B/op         fastest
+IO::Memory << '─' * 80   5.17k (193.31µs) (± 5.67%)  0.0B/op  248.19× slower
+     repeat multi-byte  98.37k ( 10.17µs) (± 8.54%)  0.0B/op   13.05× slower
+
+growth from 16 bytes to 1 MiB
+ IO::Memory   1.80k (555.18µs) (±12.22%)  2.0MB/op   1.01× slower
+ByteBuilder   1.81k (551.05µs) (±26.31%)  2.0MB/op        fastest
+
+cursor move and rgb colour, 256 per iteration
+               interpolation + str  10.79k ( 92.64µs) (± 6.50%)  64.0kB/op  16.24× slower
+                     IO::Memory <<  43.36k ( 23.06µs) (±13.28%)    0.0B/op   4.04× slower
+                   chained appends 166.87k (  5.99µs) (± 5.09%)    0.0B/op   1.05× slower
+                           bbwrite 166.60k (  6.00µs) (± 2.10%)    0.0B/op   1.05× slower
+           bbwrite with int3 hints 175.30k (  5.70µs) (± 8.74%)    0.0B/op        fastest
+                  defined template 173.06k (  5.78µs) (± 1.67%)    0.0B/op   1.01× slower
+bbwrite nesting a defined template 174.18k (  5.74µs) (± 1.54%)    0.0B/op   1.01× slower
+                  runtime template  40.33k ( 24.80µs) (± 7.71%)    0.0B/op   4.35× slower
+
+control string with optional fields, 256 per iteration
+     interpolation + str   6.04k (165.47µs) (±11.07%)  128kB/op  54.18× slower
+           chained field 298.32k (  3.35µs) (±13.89%)   0.0B/op   1.10× slower
+bbwrite with field hints 327.47k (  3.05µs) (± 2.91%)   0.0B/op        fastest
+
+base64 of 48 bytes
+    Base64.strict_encode to String   6.83M (146.37ns) (±10.15%)  96.0B/op   5.63× slower
+Base64.strict_encode to IO::Memory   2.92M (342.23ns) (±13.12%)   0.0B/op  13.17× slower
+                            base64  38.48M ( 25.99ns) (± 2.73%)   0.0B/op        fastest
+
+base64 decoding of 48 bytes
+Base64.decode to Bytes   6.88M (145.30ns) (±26.76%)  64.0B/op   4.30× slower
+              decode64  29.62M ( 33.76ns) (±10.59%)   0.0B/op        fastest
+
+base64 of 3072 bytes
+    Base64.strict_encode to String 247.86k (  4.03µs) (± 4.50%)  4.03kB/op   3.49× slower
+Base64.strict_encode to IO::Memory  53.52k ( 18.68µs) (±21.83%)    0.0B/op  16.17× slower
+                            base64 865.24k (  1.16µs) (± 3.70%)    0.0B/op        fastest
+
+base64 decoding of 3072 bytes
+Base64.decode to Bytes 104.24k (  9.59µs) (±10.12%)  3.02kB/op   5.60× slower
+              decode64 583.96k (  1.71µs) (±18.55%)    0.0B/op        fastest
+
+base64 of 1048576 bytes
+    Base64.strict_encode to String 688.84  (  1.45ms) (±12.96%)  1.34MB/op   3.40× slower
+Base64.strict_encode to IO::Memory 167.94  (  5.95ms) (±13.96%)    0.0B/op  13.94× slower
+                            base64   2.34k (427.12µs) (± 6.47%)    0.0B/op        fastest
+
+base64 decoding of 1048576 bytes
+Base64.decode to Bytes 682.83  (  1.46ms) (±25.44%)  1.0MB/op   2.08× slower
+              decode64   1.42k (703.17µs) (±10.57%)   0.0B/op        fastest
+```

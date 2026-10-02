@@ -41,6 +41,31 @@ describe ByteBuilder do
     end
   end
 
+  it "encodes 128-bit integers" do
+    builder = ByteBuilder.new(16)
+    edges = [0_u128, UInt64::MAX.to_u128, UInt64::MAX.to_u128 + 1, 10_000_000_000_000_000_000_u128,
+             99_999_999_999_999_999_999_u128, 100_000_000_000_000_000_000_u128,
+             100_000_000_000_000_000_000_000_000_000_000_000_007_u128, UInt128::MAX]
+    edges.each do |n|
+      builder.reset
+      builder.int(n)
+      text(builder).should eq(n.to_s)
+    end
+    [Int128::MIN, Int128::MAX, -1_i128, -18_446_744_073_709_551_616_i128].each do |n|
+      builder.reset
+      builder.int(n).put(n)
+      text(builder).should eq(n.to_s * 2)
+    end
+    random = Random.new(9)
+    500.times do
+      n = (random.next_u.to_u128 << 96) | (random.next_u.to_u128 << 64) | (random.next_u.to_u128 << 32) | random.next_u
+      n >>= random.rand(100)
+      builder.reset
+      builder.int(n)
+      text(builder).should eq(n.to_s)
+    end
+  end
+
   it "encodes the two and three digit fast paths" do
     builder = ByteBuilder.new
     100.times { |n| builder.int2(n).semi }
@@ -50,10 +75,62 @@ describe ByteBuilder do
     text(builder).should eq((0...256).join { |n| "#{n};" })
   end
 
-  it "writes multi-byte characters as utf-8" do
-    builder = ByteBuilder.new
-    builder.char('a').char('é').char('漢').char('🎉')
-    text(builder).should eq("aé漢🎉")
+  it "stays inside its tables when the digit fast paths get out-of-range values" do
+    builder = ByteBuilder.new(16)
+    [100, 127, 128, 255, 1_000_000, Int32::MAX, -1, Int32::MIN].each do |n|
+      before = builder.pos
+      builder.int2(n)
+      (builder.pos - before).should be <= 2
+      before = builder.pos
+      builder.int3(n)
+      (builder.pos - before).should be <= 3
+    end
+  end
+
+  it "encodes hexadecimal" do
+    builder = ByteBuilder.new(16)
+    builder.hex2(0_u8).hex2(0x0a_u8).hex2(0xff_u8).semi
+    builder.hex(0_u8).semi.hex(0xf_u8).semi.hex(0x10_u16).semi.hex(0xdeadbeef_u32).semi.hex(UInt64::MAX).semi.hex(0x1000_u64)
+    text(builder).should eq("000aff;0;f;10;deadbeef;ffffffffffffffff;1000")
+    random = Random.new(3)
+    500.times do
+      n = random.next_u.to_u64 &* random.next_u >> random.rand(60)
+      builder.reset
+      builder.hex(n)
+      text(builder).should eq(n.to_s(16))
+    end
+  end
+
+  it "pads integers with zeros" do
+    builder = ByteBuilder.new(16)
+    builder.pad(7, 3).semi.pad(123, 3).semi.pad(1234, 3).semi.pad(-5, 4).semi.pad(0, 1).semi.pad(9, 0).semi.pad(9, -3)
+    builder.semi.pad(42_u8, 5).semi.pad(UInt64::MAX, 25).semi.pad(Int64::MIN, 3)
+    text(builder).should eq("007;123;1234;-0005;0;9;9;00042;0000018446744073709551615;-9223372036854775808")
+  end
+
+  it "repeats bytes and characters" do
+    builder = ByteBuilder.new(16)
+    builder.repeat(0x20_u8, 5).repeat('x', 3).repeat('─', 4).repeat('🎉', 3).repeat('é', 1).repeat('y', 0).repeat('z', -4).repeat(0x21_u8, -1)
+    text(builder).should eq("     xxx────🎉🎉🎉é")
+    builder.reset
+    builder.repeat('─', 5000).repeat(0x2E_u8, 5000)
+    text(builder).should eq("─" * 5000 + "." * 5000)
+  end
+
+  it "writes every character as utf-8" do
+    builder = ByteBuilder.new(16)
+    sample  = ['a', '\u007f', '\u0080', 'é', '߿', 'ࠀ', '漢', '￿', '\u{10000}', '🎉', '\u{10ffff}', '\0']
+    sample.each { |char| builder.char(char) }
+    text(builder).should eq(sample.join)
+    builder.reset
+    expected = String.build do |io|
+      (0..0x10FFFF).step(97) do |code|
+        next if 0xD800 <= code <= 0xDFFF
+        builder.char(code.chr)
+        io << code.chr
+      end
+    end
+    text(builder).should eq(expected)
   end
 
   it "grows on every kind of append" do
@@ -71,19 +148,92 @@ describe ByteBuilder do
     builder.remaining.should eq(builder.capacity - 5000)
   end
 
+  it "refuses to grow past the capacity limit" do
+    builder = ByteBuilder.new(16)
+    builder.str("abc")
+    expect_raises(ArgumentError, "the limit is #{Int32::MAX}") { builder.reserve(Int32::MAX) }
+    expect_raises(ArgumentError, "the limit is") { builder.repeat(0x20_u8, Int32::MAX - 1) }
+    text(builder).should eq("abc")
+    builder.capacity.should eq(16)
+  end
+
+  it "truncates back to an earlier position" do
+    builder = ByteBuilder.new(16)
+    builder.str("keep")
+    mark = builder.pos
+    builder.str("discard this text")
+    builder.truncate(mark).str("!")
+    text(builder).should eq("keep!")
+    expect_raises(ArgumentError) { builder.truncate(6) }
+    expect_raises(ArgumentError) { builder.truncate(-1) }
+  end
+
+  it "shrinks its buffer on request" do
+    builder = ByteBuilder.new(16)
+    builder.str("x" * 100_000)
+    builder.capacity.should be >= 100_000
+    builder.reset
+    builder.str("kept")
+    builder.shrink(64)
+    builder.capacity.should eq(64)
+    text(builder).should eq("kept")
+    builder.str("y" * 200)
+    builder.shrink(32)
+    builder.capacity.should eq(204)
+    builder.shrink(100_000)
+    builder.capacity.should eq(204)
+    text(builder).should eq("kept" + "y" * 200)
+  end
+
+  it "resets without releasing its buffer" do
+    builder = ByteBuilder.new(16)
+    builder.str("x" * 100)
+    capacity = builder.capacity
+    builder.reset
+    builder.empty?.should be_true
+    builder.capacity.should eq(capacity)
+  end
+
   it "writes prefixed fields and skips nil values" do
     builder = ByteBuilder.new(16)
     absent  = nil.as(Int32?)
     present = 4.as(Int32?)
     builder.str("a=p").field(",c=", present).field(",r=", absent).field(",t=", 's').field(",n=", "x")
-    builder.field(",b=", "yz".to_slice).field(",u=", UInt64::MAX)
-    text(builder).should eq("a=p,c=4,t=s,n=x,b=yz,u=#{UInt64::MAX}")
+    builder.field(",b=", "yz".to_slice).field(",u=", UInt64::MAX).field(",f=", 1.5).field(",o=", true)
+    text(builder).should eq("a=p,c=4,t=s,n=x,b=yz,u=#{UInt64::MAX},f=1.5,o=true")
   end
 
   it "dispatches put on the value type" do
     builder = ByteBuilder.new(16)
-    builder.put(12).put("s").put('c').put("b".to_slice).put(nil).put(3_u8)
-    text(builder).should eq("12scb3")
+    builder.put(12).put("s").put('c').put("b".to_slice).put(nil).put(3_u8).put(true).put(false)
+    text(builder).should eq("12scb3truefalse")
+    mixed = [1, "two", '3', nil, 4.5, false] of Int32 | String | Char | Nil | Float64 | Bool
+    builder.reset
+    mixed.each { |value| builder.put(value) }
+    text(builder).should eq("1two34.5false")
+  end
+
+  it "writes floats without leaving their bound" do
+    builder = ByteBuilder.new(16)
+    values = [0.0, -0.0, 1.5, -2.25, 1e100, -1.7976931348623157e308, 2.2250738585072014e-308, 5e-324,
+              0.1 + 0.2, 123456789012345.67, 0.000123456789012345, Float64::INFINITY, -Float64::INFINITY, Float64::NAN]
+    values.each do |value|
+      builder.reset
+      builder.put(value)
+      text(builder).should eq(value.to_s)
+      builder.pos.should be <= ByteBuilder::FLOAT_BOUND
+    end
+    builder.reset
+    builder.put(1.5_f32).put(Float32::MAX).put(Float32::MIN_POSITIVE)
+    text(builder).should eq("#{1.5_f32}#{Float32::MAX}#{Float32::MIN_POSITIVE}")
+    random = Random.new(11)
+    2000.times do
+      value = random.next_u.to_u64.<<(32).|(random.next_u).unsafe_as(Float64)
+      builder.reset
+      builder.put(value)
+      text(builder).should eq(value.to_s)
+      builder.pos.should be <= ByteBuilder::FLOAT_BOUND
+    end
   end
 
   it "builds osc, apc, and dcs envelopes" do
@@ -94,32 +244,15 @@ describe ByteBuilder do
     text(builder).should eq("\e]21;foreground=?\e\\\e]_dnd_code;t=q\e\\\e_G\e\\\eP\e\\")
   end
 
-  it "matches the standard library base64 encoding" do
+  it "exposes a write-only IO" do
     builder = ByteBuilder.new(16)
-    40.times do |size|
-      data = Bytes.new(size) { |i| (i * 37 + size).to_u8! }
-      builder.reset
-      builder.base64(data)
-      text(builder).should eq(Base64.strict_encode(data))
-    end
-    random = Random.new(7)
-    200.times do
-      data = random.random_bytes(random.rand(600))
-      builder.reset
-      builder.str("ab").base64(data)
-      text(builder).should eq("ab" + Base64.strict_encode(data))
-    end
-    builder.reset
-    builder.base64("hello")
-    text(builder).should eq("aGVsbG8=")
-  end
-
-  it "resets without releasing its buffer" do
-    builder = ByteBuilder.new(16)
-    builder.str("x" * 100)
-    capacity = builder.capacity
-    builder.reset
-    builder.empty?.should be_true
-    builder.capacity.should eq(capacity)
+    io      = builder.io
+    io << "pi=" << 3.14159 << ' ' << 42 << ' ' << :symbol
+    io.write_byte(0x21_u8)
+    io.printf("%05d", 7)
+    {1, "two"}.to_s(io)
+    text(builder).should eq(%(pi=3.14159 42 symbol!00007{1, "two"}))
+    builder.io.should be(io)
+    expect_raises(IO::Error, "write-only") { io.read_byte }
   end
 end
