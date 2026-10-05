@@ -7,11 +7,15 @@ ByteBuilder.template BenchCell, "\e[#{row : Int32};#{col : Int32}H\e[38;2;#{red 
 
 ByteBuilder.template BenchNestedCell, "#{at : BenchMove}\e[38;2;#{red : UInt8};#{green : UInt8};#{blue : UInt8}m#{name : String}"
 
-ByteBuilder.template BenchColumns, "c=#{value : Int32},"
+ByteBuilder.template BenchColumns, ",c=#{value : Int32}"
 
-ByteBuilder.template BenchRows, "r=#{value : Int32},"
+ByteBuilder.template BenchRows, ",r=#{value : Int32}"
 
-ByteBuilder.template BenchControl, "\e_Ga=p,i=#{id : Int32},#{columns : BenchColumns?}#{rows : BenchRows?}z=#{layer : Int32}\e\\"
+ByteBuilder.template BenchControl, "\e_Ga=p,i=#{id : Int32}#{columns : BenchColumns?}#{rows : BenchRows?},z=#{layer : Int32}\e\\"
+
+ByteBuilder.template BenchSpace, " "
+
+ByteBuilder.template BenchClipboard, "\e]52;#{kinds : ByteBuilder::List(String, BenchSpace)}\e\\"
 
 rows   = Array.new(Bench::BATCH * 2) { |i| (i * 7) % 200 + 1 }
 name   = "label"
@@ -120,6 +124,11 @@ Bench.group("separated list of 8 strings, #{Bench::BATCH} per iteration") do |jo
       end
       b.st
     end
+    Bench.keep(b)
+  end
+  job.report("template with a list") do
+    b.reset
+    Bench::BATCH.times { b << BenchClipboard.new(kinds: mimes) }
     Bench.keep(b)
   end
 end

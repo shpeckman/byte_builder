@@ -14,6 +14,15 @@ module TemplateSpec
   ByteBuilder.template Pair, "#{key : Bytes}=#{value : String}"
   ByteBuilder.template Line, "<#{pair : Pair}>#{mark : Char}#{level : UInt8}"
   ByteBuilder.template Wide, "#{small : Int8},#{large : UInt128},#{signed : Int64}"
+  ByteBuilder.template Columns, ",c=#{value : Int32}"
+  ByteBuilder.template Rows, ",r=#{value : Int32}"
+  ByteBuilder.template Control, "\e_Gi=#{id : Int32}#{columns : Columns?}#{rows : Rows?},z=#{layer : Int32}\e\\"
+  ByteBuilder.template Space, " "
+  ByteBuilder.template Comma, ", "
+  ByteBuilder.template Clipboard, "\e]52;#{kinds : ByteBuilder::List(String, Space)}\e\\"
+  ByteBuilder.template Names, "#{names : ByteBuilder::List(Bytes, Comma)}"
+  ByteBuilder.template Roster, "[#{names : Names}]#{count : Int32}"
+  ByteBuilder.template Quoted, "#{text : String}''"
 end
 
 private def round_trip(value : T) : T forall T
@@ -138,6 +147,73 @@ describe "ByteBuilder.template" do
       builder << TemplateSpec::Line.new(pair: TemplateSpec::Pair.new(key: "k".to_slice, value: "a>b"), mark: 'x', level: 0_u8)
     end
     text(builder).should eq("\e[1;1H")
+  end
+
+  it "refuses to write a string whose end would be found too early" do
+    builder = ByteBuilder.new(16)
+    expect_raises(ArgumentError, %("it'" contains "''", the text that ends it)) do
+      builder << TemplateSpec::Quoted.new(text: "it'")
+    end
+    builder.empty?.should be_true
+    round_trip(TemplateSpec::Quoted.new(text: "it's")).text.should eq("it's")
+  end
+
+  it "tells apart optional segments that begin with the same characters" do
+    both    = TemplateSpec::Control.new(id: 1, columns: TemplateSpec::Columns.new(value: 80), rows: TemplateSpec::Rows.new(value: 24), layer: -1)
+    second  = TemplateSpec::Control.new(id: 2, columns: nil, rows: TemplateSpec::Rows.new(value: 24), layer: 0)
+    neither = TemplateSpec::Control.new(id: 3, columns: nil, rows: nil, layer: 7)
+    builder = ByteBuilder.new(16)
+    builder << both << second << neither
+    text(builder).should eq("\e_Gi=1,c=80,r=24,z=-1\e\\\e_Gi=2,r=24,z=0\e\\\e_Gi=3,z=7\e\\")
+    reader = ByteBuilder::Reader.new(builder.written)
+    TemplateSpec::Control.read(reader).should eq(both)
+    TemplateSpec::Control.read(reader).should eq(second)
+    TemplateSpec::Control.read(reader).should eq(neither)
+    reader.eof?.should be_true
+  end
+
+  it "writes and reads lists of strings" do
+    builder = ByteBuilder.new(16)
+    builder << TemplateSpec::Clipboard.new(kinds: ["text/plain", "é", "image/png"])
+    builder << TemplateSpec::Clipboard.new(kinds: [] of String)
+    builder << TemplateSpec::Clipboard.new(kinds: ["", "a", ""])
+    text(builder).should eq("\e]52;text/plain é image/png\e\\\e]52;\e\\\e]52; a \e\\")
+    reader = ByteBuilder::Reader.new(builder.written)
+    TemplateSpec::Clipboard.read(reader).kinds.should eq(["text/plain", "é", "image/png"])
+    TemplateSpec::Clipboard.read(reader).kinds.empty?.should be_true
+    TemplateSpec::Clipboard.read(reader).kinds.should eq(["", "a", ""])
+    reader.eof?.should be_true
+  end
+
+  it "reads a list of byte slices to the end of the input or to the enclosing text" do
+    names = TemplateSpec::Names.read(ByteBuilder::Reader.new("ada, grace, hopper"))
+    names.names.map { |name| String.new(name) }.should eq(["ada", "grace", "hopper"])
+    reader = ByteBuilder::Reader.new("ada, grace,hopper")
+    TemplateSpec::Names.read(reader).names.size.should eq(2)
+    reader.pos.should eq(10)
+    TemplateSpec::Names.read(ByteBuilder::Reader.new("")).names.empty?.should be_true
+    roster  = TemplateSpec::Roster.new(names: TemplateSpec::Names.new(names: ["ada".to_slice, "grace".to_slice]), count: 2)
+    builder = ByteBuilder.new(16)
+    builder << roster
+    text(builder).should eq("[ada, grace]2")
+    round_trip(roster).should eq(roster)
+  end
+
+  it "refuses to write list items that could not be read back" do
+    builder = ByteBuilder.new(16)
+    expect_raises(ArgumentError, %("two words" contains ' ', which begins the text that ends a list item)) do
+      builder << TemplateSpec::Clipboard.new(kinds: ["one", "two words"])
+    end
+    expect_raises(ArgumentError, %("a\\eb" contains '\\e', which begins the text that ends a list item)) do
+      builder << TemplateSpec::Clipboard.new(kinds: ["a\eb"])
+    end
+    expect_raises(ArgumentError, %("a]" contains ']', which begins the text that ends a list item)) do
+      builder << TemplateSpec::Roster.new(names: TemplateSpec::Names.new(names: ["a]".to_slice]), count: 1)
+    end
+    expect_raises(ArgumentError, "a list holding one empty item cannot be told apart from an empty list") do
+      builder << TemplateSpec::Clipboard.new(kinds: [""])
+    end
+    builder.empty?.should be_true
   end
 
   it "handles every integer width and literal-only templates" do

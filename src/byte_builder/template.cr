@@ -12,7 +12,7 @@ class ByteBuilder
 
     @[AlwaysInline]
     def self.bound(value : T, before : Bytes? = nil) : Int32
-      sizeof(T) * 2
+      16
     end
 
     @[AlwaysInline]
@@ -104,8 +104,16 @@ class ByteBuilder
   end
 
   def self.bound(value : Bytes, before : Bytes?) : Int32
-    if before && Reader.index(value, before)
-      raise ArgumentError.new("#{String.new(value).inspect} contains #{String.new(before).inspect}, the text that ends it")
+    if before
+      clash = !Reader.index(value, before).nil?
+      span  = before.size
+      (1...span).each do |shift|
+        break if shift > value.size
+        clash ||= value[value.size - shift, shift] == before[0, shift] && before[shift, span - shift] == before[0, span - shift]
+      end
+      if clash
+        raise ArgumentError.new("#{String.new(value).inspect} contains #{String.new(before).inspect}, the text that ends it")
+      end
     end
     value.size
   end
@@ -113,6 +121,24 @@ class ByteBuilder
   @[AlwaysInline]
   def self.bound(value : String, before : Bytes?) : Int32
     bound(value.to_slice, before)
+  end
+
+  def self.bound(items : Array(T), separator : Bytes, before : Bytes?) : Int32 forall T
+    if items.size == 1 && items.unsafe_fetch(0).empty?
+      raise ArgumentError.new("a list holding one empty item cannot be told apart from an empty list")
+    end
+    stops = {separator.unsafe_fetch(0), before.try(&.[0]?)}
+    total = Math.max(items.size - 1, 0) * separator.size
+    items.each do |item|
+      data = item.to_slice
+      stops.each do |stop|
+        if stop && data.index(stop)
+          raise ArgumentError.new("#{String.new(data).inspect} contains #{stop.unsafe_chr.inspect}, which begins the text that ends a list item")
+        end
+      end
+      total += data.size
+    end
+    total
   end
 
   @[AlwaysInline]
@@ -130,8 +156,8 @@ class ByteBuilder
       {% names = [] of StringLiteral %}
       {% types = [] of MacroId %}
       {% labels = [] of StringLiteral %}
-      {% firsts = [] of StringLiteral %}
-      {% mores = [] of StringLiteral %}
+      {% heads = [] of ArrayLiteral %}
+      {% trails = [] of ArrayLiteral %}
       {% empties = [] of BoolLiteral %}
       {% opens = [] of BoolLiteral %}
       {% terms = [] of MacroId %}
@@ -145,8 +171,8 @@ class ByteBuilder
             {% static += code < 0x80 ? 1 : (code < 0x800 ? 2 : (code < 0x10000 ? 3 : 4)) %}
           {% end %}
           {% labels << "" %}
-          {% firsts << piece[0...1] %}
-          {% mores << "" %}
+          {% heads << ["=" + piece] %}
+          {% trails << [] of StringLiteral %}
           {% empties << false %}
           {% opens << false %}
           {% writes << "builder.unsafe_str(#{piece})".id %}
@@ -178,10 +204,21 @@ class ByteBuilder
             {% piece.raise "field '#{field.id}' has type #{base}, which has no encoding: use an integer, Char, String, Bytes, a format such as ByteBuilder::Hex(UInt8), or another template" %}
           {% end %}
           {% source = shape || row %}
-          {% first = source[:first] %}
-          {% more = source[:more] %}
           {% empty = source[:empty] == true %}
           {% open = source[:open] == true %}
+          {% head = [] of StringLiteral %}
+          {% trail = [] of StringLiteral %}
+          {% if source[:heads] %}
+            {% for start in source[:heads] %}
+              {% head << start %}
+            {% end %}
+            {% for start in source[:trails] %}
+              {% trail << start %}
+            {% end %}
+          {% else %}
+            {% head << (open && source[:first] == "*" ? "~" : ":" + source[:first]) %}
+            {% trail << ":" + source[:more] unless source[:more].empty? %}
+          {% end %}
           {% value = base %}
           {% if shape %}
             {% hint = shape[:value] %}
@@ -191,8 +228,9 @@ class ByteBuilder
               {% piece.raise "field '#{field.id}': #{base.name(generic_args: false)} cannot encode #{value}: it accepts #{accepted.splat}" %}
             {% end %}
           {% end %}
+          {% strings = wrap == "list" && open && !shape %}
           {% delimiter = "nil" %}
-          {% if open && wrap != "list" %}
+          {% if open && (wrap != "list" || strings) %}
             {% following = pieces[index + 1] %}
             {% if following.is_a?(StringLiteral) %}
               {% delimiter = "#{following}.to_slice" %}
@@ -228,74 +266,109 @@ class ByteBuilder
             {% reads << "#{local.id} = #{read.id}\n".id %}
             {% empty = true %}
           {% else %}
-            {% if empty %}
-              {% piece.raise "field '#{field.id}' cannot be a list of #{base}: an empty item cannot be told apart from a missing one" %}
-            {% end %}
-            {% if open %}
-              {% piece.raise "field '#{field.id}' cannot be a list of #{base}: a #{base} is read up to the literal text that follows it, and a list item has none. Give the item a template of its own that ends with literal text" %}
-            {% end %}
             {% divider = separator.has_constant?("BYTE_SHAPE") ? separator.constant("BYTE_SHAPE") : nil %}
             {% unless divider && divider[:literal] == true %}
               {% piece.raise "the separator of field '#{field.id}' must be a template made only of literal text, not #{separator}" %}
             {% end %}
-            {% if more.chars.includes?(divider[:first].chars[0]) %}
-              {% piece.raise "items of field '#{field.id}' run into their separator: #{separator} begins with a character that #{base} would take as its own" %}
-            {% end %}
+            {% mark = divider[:heads][0] %}
+            {% split = "#{mark[1..-1]}.to_slice" %}
             {% types << "::Array(::#{value})".id %}
-            {% terms << "(#{access.id}.sum(0) { |__bbi| #{bound.gsub(/%value%/, "__bbi").id} } + ::Math.max(#{access.id}.size - 1, 0) * ::#{separator}.bound(::#{separator}.new))".id %}
             {% writes << "#{access.id}.each_with_index do |__bbi, __bbn|\n::#{separator}.unsafe_write(builder, ::#{separator}.new) if __bbn > 0\n#{write.gsub(/%value%/, "__bbi").id}\nend\n".id %}
-            {% reads << "#{local.id} = [] of ::#{value}\nloop do\n__bbm = reader.pos\nbreak unless #{local.id}.empty? || ::#{separator}.read?(reader)\n__bbi = #{read.id}\nif __bbi.nil?\nreader.pos = __bbm\nbreak\nend\n#{local.id} << __bbi\nend\n".id %}
-            {% more = more + divider[:first] %}
+            {% if strings %}
+              {% item = base.stringify == "String" ? "::String.new(__bbi)" : "__bbi" %}
+              {% terms << "::ByteBuilder.bound(#{access.id}, #{split.id}, #{delimiter.id})".id %}
+              {% reads << "#{local.id} = [] of ::#{value}\n__bbq = #{split.id}.unsafe_fetch(0)\n__bbt = #{delimiter.id}.try(&.[0]?)\nloop do\n__bbi = reader.take_while { |__bbc| __bbc != __bbq && __bbc != __bbt }\n#{local.id} << #{item.id}\nbreak unless ::#{separator}.read?(reader)\nend\n#{local.id}.clear if #{local.id}.size == 1 && #{local.id}.unsafe_fetch(0).empty?\n".id %}
+              {% trail = [mark] %}
+            {% else %}
+              {% if empty %}
+                {% piece.raise "field '#{field.id}' cannot be a list of #{base}: an empty item cannot be told apart from a missing one" %}
+              {% end %}
+              {% if open %}
+                {% piece.raise "field '#{field.id}' cannot be a list of #{base}: a #{base} is read up to the literal text that follows it, and a list item has none. Give the item a template of its own that ends with literal text" %}
+              {% end %}
+              {% for mine in trail %}
+                {% lead = mine.starts_with?("=") ? mine[1...2] : mine[1..-1] %}
+                {% if lead == "*" || lead.chars.includes?(mark.chars[1]) %}
+                  {% piece.raise "items of field '#{field.id}' run into their separator: #{separator} begins with a character that #{base} would take as its own" %}
+                {% end %}
+              {% end %}
+              {% terms << "(#{access.id}.sum(0) { |__bbi| #{bound.gsub(/%value%/, "__bbi").id} } + ::Math.max(#{access.id}.size - 1, 0) * ::#{separator}.bound(::#{separator}.new))".id %}
+              {% reads << "#{local.id} = [] of ::#{value}\nloop do\n__bbm = reader.pos\nbreak unless #{local.id}.empty? || ::#{separator}.read?(reader)\n__bbi = #{read.id}\nif __bbi.nil?\nreader.pos = __bbm\nbreak\nend\n#{local.id} << __bbi\nend\n".id %}
+              {% trail << mark %}
+              {% open = false %}
+            {% end %}
             {% empty = true %}
-            {% open = false %}
           {% end %}
           {% names << field %}
           {% labels << field %}
-          {% firsts << first %}
-          {% mores << more %}
+          {% heads << head %}
+          {% trails << trail %}
           {% empties << empty %}
           {% opens << open %}
         {% end %}
       {% end %}
-      {% count = firsts.size %}
-      {% for first, index in firsts %}
-        {% ahead = "" %}
+      {% count = heads.size %}
+      {% for index in 0...count %}
+        {% pending = [] of StringLiteral %}
+        {% for start in trails[index] %}
+          {% pending << start %}
+        {% end %}
+        {% for start in heads[index] %}
+          {% pending << start if empties[index] && start != "~" %}
+        {% end %}
         {% reaching = true %}
-        {% for other, later in firsts %}
+        {% for later in 0...count %}
           {% if later > index && reaching %}
-            {% ahead = (ahead == "*" || other == "*") ? "*" : ahead + other %}
+            {% for mine in pending %}
+              {% for theirs in heads[later] %}
+                {% clash = theirs == "~" %}
+                {% if !clash && mine.starts_with?("=") && theirs.starts_with?("=") %}
+                  {% others = theirs.chars %}
+                  {% differ = false %}
+                  {% for char, at in mine.chars %}
+                    {% differ = true if at < others.size && char != others[at] %}
+                  {% end %}
+                  {% clash = !differ %}
+                {% elsif !clash %}
+                  {% left = mine.starts_with?("=") ? mine[1...2] : mine[1..-1] %}
+                  {% right = theirs.starts_with?("=") ? theirs[1...2] : theirs[1..-1] %}
+                  {% clash = left == "*" || right == "*" || left.chars.any? { |char| right.chars.includes?(char) } %}
+                {% end %}
+                {% if clash %}
+                  {% raise "field '#{labels[index].id}' of template '#{@type.name}' cannot be told apart from what follows it: what comes next can begin the same way as text that reading would take as part of '#{labels[index].id}'. Put literal text that cannot begin that way between them" %}
+                {% end %}
+              {% end %}
+            {% end %}
             {% reaching = empties[later] %}
           {% end %}
         {% end %}
-        {% taken = mores[index] %}
-        {% taken = taken + first if empties[index] && first != "*" %}
-        {% if (ahead == "*" && !taken.empty?) || taken.chars.any? { |char| ahead.chars.includes?(char) } %}
-          {% raise "field '#{labels[index].id}' of template '#{@type.name}' cannot be told apart from what follows it: the text after it may begin with a character that reading would take as part of '#{labels[index].id}' (one of #{taken}). Put literal text that cannot begin that way between them" %}
-        {% end %}
       {% end %}
-      {% head = "" %}
+      {% front = [] of StringLiteral %}
       {% reaching = true %}
-      {% for first, index in firsts %}
+      {% for index in 0...count %}
         {% if reaching %}
-          {% head = (head == "*" || first == "*") ? "*" : head + first %}
+          {% for start in heads[index] %}
+            {% front << start %}
+          {% end %}
           {% reaching = empties[index] %}
         {% end %}
       {% end %}
       {% hollow = reaching %}
-      {% tail = "" %}
+      {% back = [] of StringLiteral %}
       {% reaching = true %}
       {% for offset in 0...count %}
         {% index = count - 1 - offset %}
         {% if reaching %}
-          {% tail = tail + mores[index] %}
-          {% if empties[index] && firsts[index] != "*" %}
-            {% tail = tail + firsts[index] %}
-          {% else %}
-            {% reaching = false %}
+          {% for start in trails[index] %}
+            {% back << start %}
           {% end %}
+          {% for start in heads[index] %}
+            {% back << start if empties[index] && start != "~" %}
+          {% end %}
+          {% reaching = empties[index] %}
         {% end %}
       {% end %}
-      BYTE_SHAPE = {first: {{head == "*" ? head : head.chars.uniq.join("")}}, more: {{tail.chars.uniq.join("")}}, empty: {{hollow}}, open: {{opens.last}}, literal: {{names.empty?}}}
+      BYTE_SHAPE = {heads: {{front.uniq}}, trails: {{back.empty? ? "[] of ::String".id : back.uniq}}, empty: {{hollow}}, open: {{opens.last}}, literal: {{names.empty?}}}
 
       {% for field, index in names %}
         getter {{field.id}} : {{types[index]}}

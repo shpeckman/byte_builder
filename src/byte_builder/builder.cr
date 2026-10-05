@@ -20,6 +20,7 @@ class ByteBuilder
   private macro fixed(max, signature, &block)
     @[AlwaysInline]
     def unsafe_{{signature.name}}({{signature.args.splat}}) : self
+      guard({{max}}, {{"unsafe_#{signature.name}"}})
       {{block.body}}
       self
     end
@@ -39,6 +40,7 @@ class ByteBuilder
 
     @[AlwaysInline]
     def unsafe_{{signature.name}}({{signature.args.splat}}) : self
+      guard(::ByteBuilder.bound_{{signature.name}}({{signature.args.map(&.var).splat}}), {{"unsafe_#{signature.name}"}})
       {{block.body}}
       self
     end
@@ -58,6 +60,7 @@ class ByteBuilder
 
     @[AlwaysInline]
     def unsafe_put(value : {{type}}) : self
+      guard(::ByteBuilder.bound(value), "unsafe_put")
       {{block.body}}
       self
     end
@@ -415,6 +418,18 @@ class ByteBuilder
 
   sized osc(code : String), code.bytesize + 3 do
     unsafe_byte(0x1B_u8).unsafe_byte(0x5D_u8).unsafe_str(code).unsafe_semi
+  end
+
+  @[AlwaysInline]
+  private def guard(count : Int32, name : String) : Nil
+    {% unless flag?(:release) %}
+      overrun(count, name) if count > @cap - @pos
+    {% end %}
+  end
+
+  @[NoInline]
+  private def overrun(count : Int32, name : String) : NoReturn
+    raise IndexError.new("#{name} needs room for #{count} bytes but #{@cap - @pos} remain: call reserve first")
   end
 
   @[AlwaysInline]

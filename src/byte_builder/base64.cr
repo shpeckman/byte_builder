@@ -38,6 +38,7 @@ class ByteBuilder
   end
 
   def unsafe_base64(data : Bytes) : self
+    guard(::ByteBuilder.bound_base64(data), "unsafe_base64")
     source = data.to_unsafe
     size   = data.size
     target = (@buf + @pos).as(Pointer(UInt16))
@@ -110,6 +111,7 @@ class ByteBuilder
   end
 
   def unsafe_decode64(data : Bytes) : self
+    guard(::ByteBuilder.bound_decode64(data), "unsafe_decode64")
     source = data.to_unsafe
     size   = data.size
     while size > 0 && data.size - size < 2 && source[size - 1] == BASE64_PADDING

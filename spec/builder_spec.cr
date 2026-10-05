@@ -148,6 +148,22 @@ describe ByteBuilder do
     builder.remaining.should eq(builder.capacity - 5000)
   end
 
+  {% unless flag?(:release) %}
+    it "raises when an unchecked append has no room outside release builds" do
+      builder = ByteBuilder.new(16)
+      builder.reserve(16)
+      16.times { builder.unsafe_byte(0x78_u8) }
+      expect_raises(IndexError, "unsafe_byte needs room for 1 bytes but 0 remain: call reserve first") { builder.unsafe_byte(0x78_u8) }
+      builder.truncate(10)
+      expect_raises(IndexError, "unsafe_int needs room for 11 bytes but 6 remain: call reserve first") { builder.unsafe_int(7) }
+      expect_raises(IndexError, "unsafe_str needs room for 7 bytes but 6 remain: call reserve first") { builder.unsafe_str("seven77") }
+      expect_raises(IndexError, "unsafe_put needs room for 20 bytes but 6 remain: call reserve first") { builder.unsafe_put(7_i64) }
+      expect_raises(IndexError, "unsafe_base64 needs room for 8 bytes but 6 remain: call reserve first") { builder.unsafe_base64("abcd") }
+      builder.unsafe_str("six666").pos.should eq(16)
+      builder.capacity.should eq(16)
+    end
+  {% end %}
+
   it "refuses to grow past the capacity limit" do
     builder = ByteBuilder.new(16)
     builder.str("abc")

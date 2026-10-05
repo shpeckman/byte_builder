@@ -137,6 +137,50 @@ describe "compile-time checks" do
     output.should contain("field 'row' of template 'Broken' cannot be told apart from what follows it")
   end
 
+  it "accepts optional segments that share their first characters but then differ" do
+    compile_output(<<-'CRYSTAL').should eq("")
+      ByteBuilder.template Columns, ",c=#{value : Int32}"
+      ByteBuilder.template Rows, ",r=#{value : Int32}"
+      ByteBuilder.template Control, "i=#{id : Int32}#{columns : Columns?}#{rows : Rows?},z=#{layer : Int32}"
+      ByteBuilder.template Outer, "<#{control : Control},q>"
+      Outer.read?(ByteBuilder::Reader.new(""))
+      CRYSTAL
+  end
+
+  it "rejects optional segments when one begins with the whole of another" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Columns, ",c#{value : Int32}"
+      ByteBuilder.template Broken, "i=#{id : Int32}#{columns : Columns?},c1=#{layer : Int32}"
+      CRYSTAL
+    output.should contain("field 'columns' of template 'Broken' cannot be told apart from what follows it")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Columns, ",c=#{value : Int32}"
+      ByteBuilder.template Control, "i=#{id : Int32}#{columns : Columns?}"
+      ByteBuilder.template Broken, "<#{control : Control},c=>"
+      CRYSTAL
+    output.should contain("field 'control' of template 'Broken' cannot be told apart from what follows it")
+  end
+
+  it "rejects an optional character followed by anything" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{mark : Char?};"
+      CRYSTAL
+    output.should contain("field 'mark' of template 'Broken' cannot be told apart from what follows it")
+  end
+
+  it "rejects a list of strings that nothing ends or whose separator looks like its end" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Space, " "
+      ByteBuilder.template Broken, "#{names : ByteBuilder::List(String, Space)}#{count : Int32}"
+      CRYSTAL
+    output.should contain("field 'names' has no end: a String is read up to the literal text that follows it")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Space, " "
+      ByteBuilder.template Broken, "#{names : ByteBuilder::List(String, Space)} ."
+      CRYSTAL
+    output.should contain("field 'names' of template 'Broken' cannot be told apart from what follows it")
+  end
+
   it "checks a nested template against what follows it" do
     output = compile_output(<<-'CRYSTAL')
       ByteBuilder.template Tag, ":#{value : Int32}"
@@ -149,9 +193,16 @@ describe "compile-time checks" do
   it "rejects lists whose items or separator cannot be read back" do
     output = compile_output(<<-'CRYSTAL')
       ByteBuilder.template Semi, ";"
-      ByteBuilder.template Broken, "#{names : ByteBuilder::List(String, Semi)}"
+      ByteBuilder.template Word, "#{text : String}"
+      ByteBuilder.template Broken, "#{names : ByteBuilder::List(Word, Semi)}"
       CRYSTAL
-    output.should contain("field 'names' cannot be a list of String")
+    output.should contain("field 'names' cannot be a list of Word: an empty item cannot be told apart from a missing one")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Semi, ";"
+      ByteBuilder.template Entry, "k=#{text : String}"
+      ByteBuilder.template Broken, "#{entries : ByteBuilder::List(Entry, Semi)}"
+      CRYSTAL
+    output.should contain("field 'entries' cannot be a list of Entry: a Entry is read up to the literal text that follows it")
     output = compile_output(<<-'CRYSTAL')
       ByteBuilder.template Broken, "#{values : ByteBuilder::List(Int32, Int32)}"
       CRYSTAL

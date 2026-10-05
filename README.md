@@ -1,36 +1,42 @@
 # byte_builder
 
-A growable byte buffer for Crystal with allocation-free appends, and a macro
-that turns an interpolated string literal into those appends at compile time.
+A growable byte buffer for Crystal with allocation-free appends, a cursor for
+reading bytes back, and templates that describe a byte sequence once and both
+write and read it.
 
-It is built for code that emits a lot of small, structured byte sequences, such
-as terminal escape codes:
+It is built for code that emits and parses a lot of small, structured byte
+sequences, such as terminal escape codes:
 
 ```crystal
 require "byte_builder"
 
+ByteBuilder.template Cursor, "\e[#{row : Int32};#{col : Int32}H"
+
 b = ByteBuilder.new
-bbwrite b, "\e[#{row};#{col}H\e[38;2;#{r};#{g};#{b_}m#{label}"
+b << Cursor.new(row: 12, col: 40)
 STDOUT.write(b.written)
+
+reader = ByteBuilder::Reader.new("\e[3;7H")
+if cursor = Cursor.read?(reader)
+  cursor.row # => 3
+end
 ```
 
-The `bbwrite` line allocates nothing. It reserves space once, then writes the
-literal parts and the values straight into the buffer.
+Writing a template reserves space once and allocates nothing. A template that
+cannot be read back unambiguously does not compile.
 
 ## Contents
 
 - [Installation](#installation)
 - [The builder](#the-builder)
-- [bbwrite](#bbwrite)
-- [Hints](#hints)
-- [Conditional branches](#conditional-branches)
-- [Loops](#loops)
-- [Named templates](#named-templates)
-- [Runtime templates](#runtime-templates)
-- [Ambiguous hints](#ambiguous-hints)
+- [Templates](#templates)
+- [Field types](#field-types)
+- [What a declaration rejects](#what-a-declaration-rejects)
+- [What writing rejects](#what-writing-rejects)
+- [Writing your own format](#writing-your-own-format)
+- [The reader](#the-reader)
 - [Base64](#base64)
 - [Using it as an IO](#using-it-as-an-io)
-- [Writing your own appenders](#writing-your-own-appenders)
 - [Limits](#limits)
 - [Choosing an approach](#choosing-an-approach)
 - [Development](#development)
@@ -84,30 +90,30 @@ statements.
 
 ### Appenders
 
-| Method                    | Writes                                                                                                                     |
-|---------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| `byte(UInt8)`             | One byte.                                                                                                                  |
-| `char(Char)`              | The character as UTF-8.                                                                                                    |
-| `str(String)`             | The string's bytes.                                                                                                        |
-| `bytes(Bytes)`            | The slice. A `StaticArray(UInt8, N)` is accepted too.                                                                      |
-| `int(value)`              | Any integer from `Int8` to `UInt128`, in decimal.                                                                          |
-| `int2(Int32)`             | A value from 0 to 99, without the general digit count.                                                                     |
-| `int3(Int32)`             | A value from 0 to 999, without the general digit count.                                                                    |
-| `hex(value)`              | An unsigned integer in lowercase hexadecimal, without leading zeros.                                                       |
-| `hex2(UInt8)`             | Exactly two lowercase hexadecimal digits.                                                                                  |
-| `pad(value, width)`       | An integer, left-padded with zeros to `width` digits. A minus sign is written before the padding.                          |
-| `repeat(value, count)`    | A byte or a character `count` times. A count of zero or less writes nothing.                                               |
-| `put(value)`              | Any supported value, chosen by its type: integers, floats, `Bool`, `Char`, `String`, `Bytes`, `Nil`. `nil` writes nothing. |
-| `field(prefix, value)`    | `prefix` followed by `value`, or nothing at all when `value` is `nil`.                                                     |
-| `base64(data)`            | `Bytes` or a `String`, encoded with padding.                                                                               |
-| `decode64(data)`          | The bytes that `data` decodes to.                                                                                          |
-| `format(template, *args)` | A [runtime template](#runtime-templates).                                                                                  |
-| `csi`                     | `ESC [`                                                                                                                    |
-| `osc(code)`               | `ESC ]`, the code (`Int32` or `String`), then `;`                                                                          |
-| `apc`                     | `ESC _`                                                                                                                    |
-| `dcs`                     | `ESC P`                                                                                                                    |
-| `st`                      | `ESC \`                                                                                                                    |
-| `semi`                    | `;`                                                                                                                        |
+| Method                 | Writes                                                                                                                     |
+|------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| `byte(UInt8)`          | One byte.                                                                                                                  |
+| `char(Char)`           | The character as UTF-8.                                                                                                    |
+| `str(String)`          | The string's bytes.                                                                                                        |
+| `bytes(Bytes)`         | The slice. A `StaticArray(UInt8, N)` is accepted too.                                                                      |
+| `int(value)`           | Any integer from `Int8` to `UInt128`, in decimal.                                                                          |
+| `int2(Int32)`          | A value from 0 to 99, without the general digit count.                                                                     |
+| `int3(Int32)`          | A value from 0 to 999, without the general digit count.                                                                    |
+| `hex(value)`           | An unsigned integer in lowercase hexadecimal, without leading zeros.                                                       |
+| `hex2(UInt8)`          | Exactly two lowercase hexadecimal digits.                                                                                  |
+| `pad(value, width)`    | An integer, left-padded with zeros to `width` digits. A minus sign is written before the padding.                          |
+| `repeat(value, count)` | A byte or a character `count` times. A count of zero or less writes nothing.                                               |
+| `put(value)`           | Any supported value, chosen by its type: integers, floats, `Bool`, `Char`, `String`, `Bytes`, `Nil`. `nil` writes nothing. |
+| `field(prefix, value)` | `prefix` followed by `value`, or nothing at all when `value` is `nil`.                                                     |
+| `base64(data)`         | `Bytes` or a `String`, encoded with padding.                                                                               |
+| `decode64(data)`       | The bytes that `data` decodes to.                                                                                          |
+| `<<(value)`            | A [template](#templates) value.                                                                                            |
+| `csi`                  | `ESC [`                                                                                                                    |
+| `osc(code)`            | `ESC ]`, the code (`Int32` or `String`), then `;`                                                                          |
+| `apc`                  | `ESC _`                                                                                                                    |
+| `dcs`                  | `ESC P`                                                                                                                    |
+| `st`                   | `ESC \`                                                                                                                    |
+| `semi`                 | `;`                                                                                                                        |
 
 `int2` and `int3` trust their range. A value outside it writes wrong digits,
 but never more than two or three bytes and never outside the buffer.
@@ -117,220 +123,286 @@ names the type.
 
 ### Checked and unchecked appends
 
-The appenders above check capacity on every call. Each one that has a size
-known in advance also has an `unsafe_` twin that skips the check:
+The appenders above check capacity on every call. Each one except `<<` also
+has an `unsafe_` twin that skips the check:
 
 ```crystal
 b.reserve(3 * values.size)
 values.each { |value| b.unsafe_int3(value) }
 ```
 
-An `unsafe_` call is only safe after a `reserve` that covers it. `bbwrite`
-uses these for you, so you rarely need to call them directly. Appending one
-character at a time in a loop is the main case where reserving once and using
-`unsafe_char` is worth it; for anything else prefer `str`, `repeat` or
-`bbwrite`.
+An `unsafe_` call needs room for the most that appender can write, which is
+what its checked twin reserves: 11 bytes for `unsafe_int` of an `Int32`, the
+string's size for `unsafe_str`, and so on. `ByteBuilder.bound(value)` and
+`ByteBuilder.bound_<name>(arguments)` report that size where it depends on the
+arguments.
 
-## bbwrite
+- **Without `--release`**, every `unsafe_` call verifies that room and raises
+  `IndexError` when it is missing, before writing anything. A reservation that
+  is too small shows up in your specs.
+- **With `--release`**, the check is compiled out and nothing protects you.
 
-`bbwrite builder, "literal"` is a macro. It splits the string literal into its
-plain parts and its `#{...}` parts at compile time and emits one append per
-part. No string is built at run time.
+Templates use the unchecked appenders for you, so you rarely need to call
+them directly.
 
-```crystal
-bbwrite b, "\e[#{row};#{col}H#{name}"
-```
+## Templates
 
-expands to roughly:
-
-```crystal
-values = {row, col, name}
-b.reserve(4 + bound(row) + bound(col) + bound(name))
-b.unsafe_str("\e[")
-b.unsafe_put(values[0])
-b.unsafe_str(";")
-b.unsafe_put(values[1])
-b.unsafe_str("H")
-b.unsafe_put(values[2])
-```
-
-Things to know:
-
-- **It returns the builder**, so `bbwrite(b, "...").st` chains.
-- **`ByteBuilder.write(b, "...")`** is the same macro under another name.
-- **The template must be a literal.** A string literal, a heredoc, or a
-  constant holding a string literal all work. A variable is a compile error.
-- **Values are evaluated first.** The builder expression, every interpolated
-  value and every hint argument are evaluated exactly once, left to right,
-  before anything is written. An expression that reads the builder's own state,
-  such as `#{b.pos}`, sees the state from before the write.
-- **Values are written by type.** Integers, floats, `Bool`, `Char`, `String`,
-  `Bytes` and `nil` are supported, as are unions of them. Anything else is a
-  compile error naming the type; convert it yourself, for example with `to_s`.
-
-## Hints
-
-A bare call to an appender inside an interpolation is not evaluated as an
-expression. It tells `bbwrite` which appender to use:
+`ByteBuilder.template Name, "text"` declares a struct in the current
+namespace. Each `#{name : Type}` in the text is a field.
 
 ```crystal
-bbwrite b, "\e[38;2;#{int3(r)};#{int3(g)};#{int3(b_)}m"
-bbwrite b, "\e_Ga=T,f=100;#{base64(png)}\e\\"
-bbwrite b, "#{hex2(red)}#{pad(index, 3)}#{repeat(' ', width)}"
-bbwrite b, "a=p#{field(",c=", columns)}#{field(",r=", rows)}"
+ByteBuilder.template Cursor, "\e[#{row : Int32};#{col : Int32}H"
+ByteBuilder.template Color, "##{red : ByteBuilder::Hex2}#{green : ByteBuilder::Hex2}#{blue : ByteBuilder::Hex2}"
 ```
 
-Any appender works as a hint, including [named templates](#named-templates)
-and your [own appenders](#writing-your-own-appenders). Named arguments are
-passed through.
+The struct has:
 
-A call on the builder itself is treated the same way, which is how you spell a
-hint explicitly:
+| Member                        | What it does                                                                            |
+|-------------------------------|-----------------------------------------------------------------------------------------|
+| `Name.new(field: value, ...)` | Builds a value. Arguments are named, never positional, so two fields cannot be swapped. |
+| a getter per field            | Returns the field's value.                                                              |
+| `Name.read?(reader)`          | Reads one value, or returns `nil` and leaves the reader where it was.                   |
+| `Name.read(reader)`           | Reads one value, or raises `ByteBuilder::Reader::Error` carrying the position.          |
+| `Name.bound(value)`           | The most bytes the value can take when written.                                         |
+| `Name.unsafe_write(b, value)` | Writes without checking capacity. `b << value` is the checked form; prefer it.          |
+
+Two values of a template are equal when their fields are.
+
+**Writing** is `builder << value`. It works out the size, reserves once, and
+writes the literal text and the fields straight into the buffer. It returns the
+builder, so `b << first << second` chains.
+
+**Reading** takes a `ByteBuilder::Reader`. It matches the literal text and
+parses each field in order. It does not require the input to end where the
+template does, so several values can be read one after another:
 
 ```crystal
-bbwrite b, "#{b.int3(r)}"
+reader = ByteBuilder::Reader.new(b.written)
+while cursor = Cursor.read?(reader)
+  # ...
+end
 ```
 
-Hints stay inside the single reservation: the macro adds each hint's size to
-the one `reserve` call.
+The text must be a string literal in the source. A type used by a field must
+be declared before the template that uses it.
 
-To call a method of your own that happens to share an appender's name, wrap it
-in parentheses or give it a receiver:
+## Field types
+
+| Type                                 | Written as                                   | Read back as                                                         |
+|--------------------------------------|----------------------------------------------|----------------------------------------------------------------------|
+| `Int8` to `Int128`, and unsigned     | Decimal, with `-` when negative.             | The same type. Leading zeros are accepted; overflow fails the read.  |
+| `Char`                               | UTF-8.                                       | One character. Malformed UTF-8 fails the read.                       |
+| `String`                             | Its bytes.                                   | A new `String`, up to the text that follows the field.               |
+| `Bytes`                              | Its bytes.                                   | A view into the input, up to the text that follows the field.        |
+| `ByteBuilder::Hex(T)`                | Lowercase hexadecimal without leading zeros. | `T`, an unsigned integer up to `UInt64`. Either case is accepted.    |
+| `ByteBuilder::Hex2`                  | Exactly two lowercase hexadecimal digits.    | `UInt8`.                                                             |
+| `ByteBuilder::Padded(T, N)`          | Decimal, zero-padded to at least `N` digits. | `T`, an integer up to 64 bits. Fewer than `N` digits fails the read. |
+| `ByteBuilder::Base64(T)`             | Padded base64 of a `String` or `Bytes`.      | The decoded data, newly allocated.                                   |
+| another template                     | That template.                               | That template.                                                       |
+| `Type?`                              | `Type`, or nothing when the value is `nil`.  | `nil` when `Type` does not match at that point.                      |
+| `ByteBuilder::List(Item, Separator)` | The items with the separator between them.   | An `Array` of the item type. An empty list writes nothing.           |
+
+The value a format type holds is its type argument: a `Hex(UInt32)` field is a
+`UInt32`, and a `Padded(Int32, 4)` field is an `Int32`.
+
+### Optional parts
+
+Only a field can be optional, so to make literal text optional give it a
+template of its own:
 
 ```crystal
-bbwrite b, "#{(int3(r))}"      # your int3
-bbwrite b, "#{self.int3(r)}"   # your int3
+ByteBuilder.template Columns, ",c=#{value : Int32}"
+ByteBuilder.template Rows, ",r=#{value : Int32}"
+ByteBuilder.template Place, "\e_Ga=p,i=#{id : Int32}#{columns : Columns?}#{rows : Rows?},z=#{layer : Int32}\e\\"
+
+b << Place.new(id: 1, columns: Columns.new(value: 80), rows: nil, layer: 0)
+# \e_Ga=p,i=1,c=80,z=0\e\\
 ```
 
-See [Ambiguous hints](#ambiguous-hints) for what happens when you don't.
+### Lists
 
-## Conditional branches
-
-An interpolation that is an `if`, an `unless`, a ternary or an `&&`, and whose
-branches are string literals, is a conditional branch. Each branch is a
-template of its own and may contain values, hints and further branches.
+The separator is a template made only of literal text:
 
 ```crystal
-bbwrite b, "a=p#{",c=#{columns}" if columns}#{",d=A" if free_data}"
-bbwrite b, "#{more ? "m=1" : "m=0;#{base64(last)}"}"
-bbwrite b, "#{",q=#{quiet}" unless quiet.zero?}"
-bbwrite b, "#{transient && ",N=1"}"
+ByteBuilder.template Semi, ";"
+ByteBuilder.template Style, "\e[#{params : ByteBuilder::List(UInt8, Semi)}m"
+
+b << Style.new(params: [1_u8, 38_u8, 255_u8]) # \e[1;38;255m
 ```
 
-- The condition is evaluated once, in its place in the source order.
-- A branch's values are evaluated only if that branch is taken, so
-  `#{",c=#{columns + 1}" if columns}` is safe when `columns` is `nil`.
-- A missing branch, or one that is `nil`, writes nothing. With `&&`, a false
-  condition writes nothing.
-- The whole sequence still uses one reservation.
+Items may be integers, `Char`, format types, templates, `String` or `Bytes`.
 
-A conditional whose branches are not string literals is an ordinary value:
-`#{wide ? 80 : 40}` writes `80` or `40`.
+### Strings and where they end
 
-## Loops
-
-`each` writes a template once per item:
+A `String` or `Bytes` field has no length of its own. It is read up to the
+literal text that follows it, or to the end of the input when it is the last
+thing in the template. A template that ends with such a field takes its end
+from wherever it is used:
 
 ```crystal
-bbwrite b, "[#{each(items) { |item| "<#{item}>" }}]"
-bbwrite b, "\e]52;#{each(mimes, ' ') { |mime| "#{mime}" }}\e\\"
-bbwrite b, "#{each(pairs) { |key, value| "#{key}=#{value};" }}"
+ByteBuilder.template Title, ";#{text : String}"
+ByteBuilder.template Cell, "#{at : Cursor}#{title : Title?}\e\\"
 ```
 
-- The first argument is any collection that responds to `each_with_index`.
-- The optional second argument is a separator written between items.
-- The block must contain only a string literal. It may use values, hints,
-  branches and nested loops.
-- Several block parameters destructure each item, as with `Hash#each`.
+Here a title is read up to `\e\\`.
 
-A loop's size is not known in advance, so the generated code reserves once per
-item and once more for whatever follows the loop. For the same reason a loop
-cannot be used inside `ByteBuilder.define` or inside a conditional branch.
+A list of `String` or `Bytes` works the same way, and each item also ends at
+the separator.
 
-## Named templates
+## What a declaration rejects
 
-`ByteBuilder.define` turns a template into a method on the builder:
+Each of these is a compile error that names the field:
+
+- **A field that runs into what follows it.** Two numbers with nothing between
+  them, a number followed by text that starts with a digit, or a number
+  followed by a `Char` or a `String`.
+- **A `String` or `Bytes` that nothing ends.** It must be followed by literal
+  text or be last.
+- **An optional field or a list that begins like what follows it.** Text that
+  merely shares its first characters is fine, as `,c=` and `,r=` above. It is
+  rejected when one begins with the whole of the other, as `,c` and `,c=`.
+- **A separator that an item could swallow,** such as a list of integers
+  separated by `0`.
+- **An optional `String`, `Bytes` or `Base64`,** because a missing one cannot
+  be told apart from an empty one. Give it a template that starts with literal
+  text and make that optional.
+- **A list whose items could be empty,** other than a list of `String` or
+  `Bytes`.
+- **A list whose items are templates ending in a `String` or `Bytes`.** Give
+  the item template literal text at its end.
+- **A format given a type it cannot encode,** such as `Hex(Int32)`.
+- **A type with no encoding,** such as `Float64` or an `Array`.
+- **A union other than `Type?`,** a field declared twice, a hole that is not
+  `name : Type`, or a template with no text.
+
+The checks compare what can come first: the leading literal text of a
+template, or the characters a number or format can start with. They are
+deliberately conservative, so a declaration that compiles can always be read
+back.
+
+## What writing rejects
+
+Some conflicts depend on the values, so they are checked when writing. Each
+raises `ArgumentError` before anything is written:
+
+- **A `String` or `Bytes` that contains the text that ends it,** or that would
+  make that text appear early. With `"#{text : String}''"`, the value `it'`
+  is rejected.
+- **A list item of `String` or `Bytes` that contains the first byte** of the
+  separator or of the text that follows the list.
+- **A list of `String` or `Bytes` holding exactly one empty item,** because it
+  would be written the same as an empty list.
+
+A value that writes without raising always reads back equal.
+
+## Writing your own format
+
+A format is a module with a `BYTE_SHAPE` constant and three class methods:
 
 ```crystal
-ByteBuilder.define move(row, col), "\e[#{row + 1};#{col + 1}H"
-ByteBuilder.define rgb(r : Int32, g : Int32, b : Int32), "\e[38;2;#{int3(r)};#{int3(g)};#{int3(b)}m"
+module Percent
+  BYTE_SHAPE = {first: "0123456789", more: "", value: UInt8}
 
-b.move(0, 0).rgb(255, 128, 0)
+  def self.bound(value : UInt8, before : Bytes? = nil) : Int32
+    4
+  end
+
+  def self.unsafe_write(builder : ByteBuilder, value : UInt8) : Nil
+    builder.unsafe_int3(value.to_i32).unsafe_byte(0x25_u8)
+  end
+
+  def self.read?(reader : ByteBuilder::Reader, before : Bytes? = nil) : UInt8?
+    start = reader.pos
+    value = reader.int?(UInt8)
+    return value if value && reader.match?('%')
+    reader.pos = start
+    nil
+  end
+end
+
+ByteBuilder.template Progress, "[#{done : Percent}]"
 ```
 
-- Parameters may carry type restrictions. Expressions in the template may use
-  them freely, and each expression is evaluated once per call.
-- A parameter named like an appender is a value inside its template, not a
-  hint.
-- A named template is itself an appender, so it works as a hint:
-  `bbwrite b, "#{move(row, col)}#{label}"`. Nesting costs no extra
-  reservation.
-- Defining a name that `ByteBuilder` already has is a compile error.
-- Mistakes inside a template are reported when the template is first used,
-  not where it is defined.
+| Key       | Meaning                                                                                                                     |
+|-----------|-----------------------------------------------------------------------------------------------------------------------------|
+| `first`   | The characters the written form can begin with, or `"*"` for any.                                                           |
+| `more`    | The characters that would be taken as part of the value if they came right after it. Empty when the form marks its own end. |
+| `value`   | The type a field holds: a type, or the position of one of the format's type arguments. Left out, it is the format itself.   |
+| `accepts` | Optional. A tuple of the types `value` may be; anything else is a compile error at the declaration.                         |
+| `empty`   | Optional. `true` when the written form can be zero bytes.                                                                   |
 
-`define` adds methods to `ByteBuilder` for the whole program. Choose names that
-will not collide with another library's, for example by prefixing them.
+The declaration checks rely on `first` and `more` being accurate.
 
-## Runtime templates
+- `bound` must never be smaller than what `unsafe_write` writes.
+- `read?` must leave the reader where it was when it returns `nil`.
+- `before` is the text that follows the field, when there is any. Only formats
+  that read up to that text need it.
 
-When a template is only known at run time, parse it once into a
-`ByteBuilder::Template` and write it with `format`:
+## The reader
+
+`ByteBuilder::Reader` is a cursor over `Bytes` or a `String`. It is a class,
+so passing it to a method shares the cursor.
 
 ```crystal
-MOVE = ByteBuilder::Template.new("\e[{0};{1}H")
-b.format(MOVE, row, col)
+reader = ByteBuilder::Reader.new(input)
+if reader.csi? && (row = reader.int?(Int32)) && reader.semi? && (col = reader.int?(Int32)) && reader.match?('R')
+  # row and col are Int32 here
+end
 ```
 
-- `{0}`, `{1}` and so on refer to the arguments by position. An argument may
-  be used more than once or not at all.
-- `{{` and `}}` write literal braces.
-- A placeholder may name a format: `{0:int2}`, `{0:int3}`, `{0:hex}`,
-  `{0:hex2}`, `{0:base64}`. Without one, the value is written by its type, as
-  with `put`.
-- A malformed template raises `ArgumentError` from `Template.new`.
-- Too few arguments, or an argument of the wrong type for its format, raises
-  `ArgumentError` before anything is written.
+Every parser comes in two forms. The form ending in `?` returns `nil` (or
+`false` for a matcher) and leaves the cursor where it was. The plain form
+raises `ByteBuilder::Reader::Error`, whose `position` is the byte offset.
 
-`format` is an appender, so it also works as a hint inside `bbwrite`. It is
-slower than `bbwrite`, because the arguments are resolved at run time; use it
-only when the template cannot be a literal.
+### State
 
-## Ambiguous hints
+| Method        | Result                                                                    |
+|---------------|---------------------------------------------------------------------------|
+| `pos`         | The cursor's byte offset.                                                 |
+| `pos = n`     | Moves the cursor. Raises `ArgumentError` outside the input.               |
+| `size`        | Size of the input.                                                        |
+| `remaining`   | `size - pos`.                                                             |
+| `eof?`        | Whether the cursor is at the end.                                         |
+| `data`        | The whole input.                                                          |
+| `rest`        | The input from the cursor on, without moving.                             |
+| `peek?`       | The next byte without moving, or `nil` at the end.                        |
+| `reset`       | Moves the cursor back to the start.                                       |
+| `reset(data)` | Points the reader at new `Bytes` or a new `String`, so one can be reused. |
 
-Because a bare call such as `#{st}` or `#{int3(x)}` means "the builder's
-appender", it could silently shadow a method of yours with the same name.
-`bbwrite` refuses to guess. If the name is also a method that can be called
-at that point, compilation stops with:
+### Values
 
-```
-'int3' is ambiguous: it names a ByteBuilder appender and a method available
-here. Write b.int3(...) for the appender, or (int3(...)) for your own method.
-```
+| Method                     | Reads                                                                                       |
+|----------------------------|---------------------------------------------------------------------------------------------|
+| `byte`                     | One byte.                                                                                   |
+| `char`                     | One UTF-8 character.                                                                        |
+| `int(type, width = 0)`     | A decimal integer of `type`. With a `width`, exactly that many digits.                      |
+| `hex(type, width = 0)`     | A hexadecimal integer of an unsigned `type`, in either case.                                |
+| `hex2`                     | Exactly two hexadecimal digits as a `UInt8`.                                                |
+| `read(type, before = nil)` | A value by type: an integer, `Char`, `String` or `Bytes`. The last two read up to `before`. |
 
-The same applies to `each` when the calling type has an `each` of its own.
+### Slices
 
-The check covers:
+These return views into the input and copy nothing.
 
-- methods of the calling class or module, including private, inherited and
-  class methods;
-- public top-level methods;
-- file-private top-level methods, written as `private def name` in the same
-  file as the `bbwrite` call.
+| Method                  | Takes                                                                              |
+|-------------------------|------------------------------------------------------------------------------------|
+| `take(count)`           | Exactly `count` bytes.                                                             |
+| `take_until(delimiter)` | Everything before a `UInt8`, `Bytes` or `String` delimiter, which is not consumed. |
+| `take_while { }`        | Bytes while the block is true. Always succeeds, so it has no `?` form.             |
+| `take_rest`             | Everything left. Always succeeds.                                                  |
+| `base64`                | The run of base64 characters and padding, still encoded. Always succeeds.          |
 
-The last of these is found by reading the source file, because the compiler
-does not expose file-private methods to macros. That has two consequences:
+### Matchers
 
-- **False alarms.** Any `private def` in the file with an appender's name
-  triggers the error, even one inside a class the call cannot reach. The fix
-  is the same: write `b.name(...)` for the appender.
-- **Two cases are not detected.** A file-private method that is itself
-  generated by a macro does not appear in the source text. And when the
-  `bbwrite` call is generated by another macro, there may be no source file to
-  read. In both, a bare hint still means the builder's appender.
-
-If in doubt, spell hints with the builder as receiver. That form is never
-ambiguous.
+| Method         | Matches                                           |
+|----------------|---------------------------------------------------|
+| `match(value)` | A `UInt8`, `Char`, `String` or `Bytes`.           |
+| `csi`          | `ESC [`                                           |
+| `osc(code)`    | `ESC ]`, the code (`Int32` or `String`), then `;` |
+| `apc`          | `ESC _`                                           |
+| `dcs`          | `ESC P`                                           |
+| `st`           | `ESC \`                                           |
+| `semi`         | `;`                                               |
 
 ## Base64
 
@@ -347,8 +419,10 @@ b.decode64("aGVsbG8=")
   characters. `more` is `false` for the last one.
 
 ```crystal
+ByteBuilder.template Chunk, "\e_Gm=#{more : UInt8};#{data : ByteBuilder::Base64(Bytes)}\e\\"
+
 ByteBuilder.base64_chunks(image) do |chunk, more|
-  bbwrite b, "\e_G#{more ? "m=1" : "m=0"};#{base64(chunk)}\e\\"
+  b << Chunk.new(more: more ? 1_u8 : 0_u8, data: chunk)
 end
 ```
 
@@ -366,193 +440,80 @@ The adapter is created on first use and reused. Reading from it raises
 `IO::Error`. Writes through it are checked appends, so they are safe but
 slower than the builder's own methods.
 
-## Writing your own appenders
-
-Reopen `ByteBuilder` and mark the method with the `Appender` annotation. That
-makes it usable as a hint. How much `bbwrite` can do with it depends on what
-the annotation says.
-
-**No size information.** The method is called as written, and `bbwrite`
-reserves again after it. It cannot be used inside `define` or inside a
-conditional branch.
-
-```crystal
-class ByteBuilder
-  @[Appender]
-  def shout(text : String) : self
-    str(text.upcase)
-  end
-end
-```
-
-**A fixed maximum.** Give `max:` and provide an `unsafe_` twin that writes at
-most that many bytes without checking.
-
-```crystal
-class ByteBuilder
-  @[AlwaysInline]
-  def unsafe_percent(value : Int32) : self
-    unsafe_int3(value).unsafe_byte(0x25_u8)
-  end
-
-  @[Appender(max: 4)]
-  def percent(value : Int32) : self
-    reserve(4)
-    unsafe_percent(value)
-  end
-end
-```
-
-**A size computed from the arguments.** Give `sized: true` and provide both
-`ByteBuilder.bound_<name>` and `unsafe_<name>`, taking the same arguments as
-the appender. The bound must never be smaller than what the unsafe method
-writes.
-
-```crystal
-class ByteBuilder
-  def self.bound_quoted(text : String) : Int32
-    text.bytesize + 2
-  end
-
-  def unsafe_quoted(text : String) : self
-    unsafe_byte(0x22_u8).unsafe_str(text).unsafe_byte(0x22_u8)
-  end
-
-  @[Appender(sized: true)]
-  def quoted(text : String) : self
-    reserve(ByteBuilder.bound_quoted(text))
-    unsafe_quoted(text)
-  end
-end
-```
-
-For a sequence that is just a template, `ByteBuilder.define` generates all of
-this for you.
-
 ## Limits
 
 - **Size.** A builder holds at most 2 GiB (`Int32::MAX` bytes). Growing past
   that raises `ArgumentError`.
-- **Not thread-safe.** A builder has no locking.
-- **Templates are literals.** `bbwrite` and `define` need the string in the
-  source. Use a runtime template otherwise.
-- **Loops are not sized.** `each` cannot appear in `define` or in a
-  conditional branch.
-- **Ambiguity detection** has the two gaps described under
-  [Ambiguous hints](#ambiguous-hints).
-- **Top-level names.** The shard defines `ByteBuilder` and the `bbwrite` macro
-  at the top level, and `define` adds methods to `ByteBuilder` globally.
-- **Internal names.** `ByteBuilder.expand`, `bind`, `on_then`, `on_else` and
-  `Else` are public only because generated code calls them. Do not use them
-  directly. Generated code also uses locals beginning with `__bb`.
+- **Not thread-safe.** Neither a builder nor a reader has any locking.
+- **Templates are literals.** The text must be in the source. There is no way
+  to load a template at run time.
+- **No floats in templates.** The reader cannot parse them. `put` still writes
+  them to a builder.
+- **Reading can allocate.** A `String` field, a `Base64` field and a list each
+  allocate when read. Integers, `Char`, `Bytes` and nested templates do not.
+- **`Bytes` fields are views.** They are only valid while the input they were
+  read from is.
+- **Names.** A template includes `ByteBuilder::Template` and defines a
+  `BYTE_SHAPE` constant. Generated code uses locals beginning with `__bb`.
 
 ## Choosing an approach
 
-Start from the shape of what you are writing.
-
 ```
-Is the text of the sequence written in your source code?
+Is the sequence both written and read, or used in more than one place?
 │
-├╴No, it arrives at run time (configuration, user input)
-│ ╰╴ByteBuilder::Template with b.format
+├╴Yes
+│ ╰╴ByteBuilder.template
 │
-╰╴Yes
+╰╴No, it is written once
   │
-  ├╴Is its shape fixed, apart from the values?
-  │ │
-  │ ├╴Yes, and it is used in one place
-  │ │ ╰╴bbwrite
-  │ │
-  │ ╰╴Yes, and it is used in several places
-  │   ╰╴ByteBuilder.define, then call it or use it as a hint
+  ├╴A fixed shape with a few values
+  │ ╰╴chained appenders:        b.csi.int(row).semi.int(col).char('H')
   │
-  ├╴Are some parts present only sometimes?
-  │ │
-  │ ├╴One value that may be nil, with a fixed prefix
-  │ │ ╰╴field hint:            #{field(",c=", columns)}
-  │ │
-  │ ╰╴Anything else that depends on a condition
-  │   ╰╴conditional branch:    #{",c=#{columns}" if columns}
+  ├╴One value that may be nil, with a fixed prefix
+  │ ╰╴field:                    b.field(",c=", columns)
   │
-  ├╴Is a part repeated once per item?
-  │ │
-  │ ├╴Every item is written the same way
-  │ │ ╰╴each loop:             #{each(items, ' ') { |item| "#{item}" }}
-  │ │
-  │ ╰╴Items differ by position, the loop exits early, or it sits inside a define or a conditional branch
-  │   ╰╴chained appends in an ordinary loop
+  ├╴The same byte or character many times
+  │ ╰╴repeat
   │
-  ╰╴Is it one byte, character or number at a time in a tight loop?
-    │
-    ├╴The same byte or character many times
-    │ ╰╴repeat
-    │
-    ├╴You can bound the total size before the loop
-    │ ╰╴reserve once, then the unsafe_ appenders
-    │
-    ╰╴Otherwise
-      ╰╴the checked appenders
-```
-
-Inside any template, pick how a value is written:
-
-```
-What is the value?
-│
-├╴An integer known to be 0..99 or 0..999      → int2 / int3 hint
-├╴A byte that must be two hex digits          → hex2 hint
-├╴An integer that needs leading zeros         → pad hint
-├╴Binary data for a text protocol             → base64 hint
-├╴Text or a number, written as it is          → no hint: #{value}
-├╴Something with its own to_s(io) only        → value.to_s(b.io), outside the template
-╰╴A payload too large for one packet          → ByteBuilder.base64_chunks around a bbwrite
+  ├╴One byte, character or number at a time in a tight loop, with a size you can bound
+  │ ╰╴reserve once, then the unsafe_ appenders
+  │
+  ╰╴Something with its own to_s(io) only
+    ╰╴value.to_s(b.io)
 ```
 
 ### What each choice costs
 
-| Choice                                    | Capacity checks                                             | Other effects                                                                                                                                    |
-|-------------------------------------------|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `bbwrite`                                 | One for the whole sequence.                                 | Values and hint arguments are evaluated before anything is written.                                                                              |
-| Hint with a fixed or computed size        | None of its own; it is counted in the sequence's one check. | Tells the macro the type, so no dispatch on the value.                                                                                           |
-| Conditional branch                        | None of its own.                                            | The condition is evaluated once; its outcome is checked when sizing and again when writing. A branch's values are evaluated only if it is taken. |
-| `each` loop                               | One per item, plus one for whatever follows the loop.       | Cannot be used in `define` or in a conditional branch.                                                                                           |
-| Appender without size information         | Its own, plus one for whatever follows it.                  | Cannot be used in `define` or in a conditional branch.                                                                                           |
-| `ByteBuilder.define`                      | One per call. Nested in another template, none of its own.  | Adds a method to `ByteBuilder` for the whole program.                                                                                            |
-| Chained appends                           | One per append.                                             | A possible call into the growth path on every append, which stops the compiler keeping the write position in a register across a loop.           |
-| `reserve` then `unsafe_` appends          | One, at the `reserve`.                                      | Nothing protects you if the reservation is too small.                                                                                            |
-| Runtime template                          | One per `format` call.                                      | Every argument is dispatched on its type at run time, twice: once to size it, once to write it. The slowest of the builder's own options.        |
-| `b.io`                                    | One per write.                                              | Each write is a virtual call. Use it only to reach code that needs an `IO`.                                                                      |
-| Interpolating into a `String`, then `str` | One.                                                        | Allocates the string and copies it. This is what `bbwrite` exists to avoid.                                                                      |
+| Choice                                    | Capacity checks        | Other effects                                                                               |
+|-------------------------------------------|------------------------|---------------------------------------------------------------------------------------------|
+| Template                                  | One per `<<`.          | The value is a struct on the stack. `String` and list fields are checked against their end. |
+| Chained appends                           | One per append.        | A possible call into the growth path on every append.                                       |
+| `reserve` then `unsafe_` appends          | One, at the `reserve`. | Verified outside `--release` only.                                                          |
+| `b.io`                                    | One per write.         | Each write is a virtual call. Use it only to reach code that needs an `IO`.                 |
+| Interpolating into a `String`, then `str` | One.                   | Allocates the string and copies it.                                                         |
 
 Effects that apply whichever way you write:
 
-- **Union types are dispatched at run time.** A value typed `Int32?` or
-  `Int32 | String` costs a type test per write. A value with one concrete type
-  costs none.
 - **Floats are dominated by formatting.** The builder gains little over an
   `IO` for them.
-- **`int2` and `int3` skip the digit count** and reserve fewer bytes than
-  `int`. They are only correct inside their range.
 - **Growth copies the buffer.** Give `ByteBuilder.new` a capacity close to
   what you expect, and reuse one builder with `reset` instead of creating one
   per sequence.
 - **`reset` keeps the memory, `shrink` gives it back.** After one unusually
   large write, call `shrink` if the builder is long-lived.
-- **`written` is a view.** Growing or shrinking invalidates it.
+- **Reuse one reader** with `reset(data)` instead of creating one per input.
 
 ### Measuring
 
-The shard includes a benchmark suite that compares each approach above with
-string interpolation, `IO::Memory` and the standard library's `Base64`:
+The shard includes benchmarks that compare these approaches with string
+interpolation, `IO::Memory` and the standard library's `Base64`:
 
 ```
-shards build bench --release --no-debug
-./bin/bench
+crystal run --release --no-debug bench/all.cr
 ```
 
 - **Pin the run to one core** on a processor with both performance and
-  efficiency cores, so the scheduler does not move it mid-measurement:
-  `taskset -c 0 ./bin/bench`.
+  efficiency cores, so the scheduler does not move it mid-measurement.
 - **Compare rows within one run.** Two builds of identical code can place a
   small loop differently and shift its timing, so a modest difference between
   two builds is not evidence of a change.
@@ -564,15 +525,9 @@ crystal spec
 ```
 
 The suite includes `spec/compile_spec.cr`, which compiles small programs and
-checks the error messages the macros produce. It needs the `crystal` binary on
-the path, or its location in the `CRYSTAL` environment variable, and adds
-several seconds to the run.
-
-To see what a `bbwrite` call expands to:
-
-```
-crystal tool expand -c path/to/file.cr:LINE:COLUMN path/to/file.cr
-```
+checks the error messages the template macro produces. It needs the `crystal`
+binary on the path, or its location in the `CRYSTAL` environment variable, and
+adds several seconds to the run.
 
 ## License
 
