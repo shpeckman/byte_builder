@@ -1,353 +1,170 @@
 # spec/compile_spec.cr
 require "./spec_helper"
 
-private PRELUDE = <<-CRYSTAL
-  b = ByteBuilder.new
-  row = 1
-  CRYSTAL
-
 describe "compile-time checks" do
   it "accepts a valid program" do
-    compile_output(<<-CRYSTAL).should eq("")
-      #{PRELUDE}
-      ByteBuilder.define jump(row, col), "\\e[\#{row};\#{col}H"
-      bbwrite b, "\\e[\#{row}H\#{int3(row)}\#{jump(row, 2)}\#{1.5}"
-      b.format(ByteBuilder::Template.new("{0}"), row)
+    compile_output(<<-'CRYSTAL').should eq("")
+      ByteBuilder.template Semi, ";"
+      ByteBuilder.template Move, "\e[#{row : Int32};#{col : Int32}H"
+      ByteBuilder.template Title, ";#{text : String}"
+      ByteBuilder.template Cell, "#{at : Move}#{shade : ByteBuilder::Hex2}#{title : Title?}\e\\#{params : ByteBuilder::List(UInt8, Semi)}m"
+      b = ByteBuilder.new
+      b << Cell.new(at: Move.new(row: 1, col: 2), shade: 3_u8, title: nil, params: [1_u8])
+      cell = Cell.read(ByteBuilder::Reader.new(b.written))
+      cell.at.row + cell.params.size
       CRYSTAL
-  end
-
-  it "rejects a variable as the template" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      template = "x"
-      bbwrite b, template
-      CRYSTAL
-    output.should contain("bbwrite expects a string literal or a constant holding one, not Var")
-  end
-
-  it "rejects a constant that is not a string" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      WIDTH = 5
-      bbwrite b, WIDTH
-      CRYSTAL
-    output.should contain("bbwrite expects a string literal or a constant holding one, not Path")
-  end
-
-  it "names the type of an unsupported value" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      bbwrite b, "\#{[1, 2]}"
-      CRYSTAL
-    output.should contain("ByteBuilder cannot write a value of type Array(Int32)")
-  end
-
-  it "names the unsupported member of a union" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      value = rand < 0.5 ? 1 : :symbol
-      bbwrite b, "\#{value}"
-      CRYSTAL
-    output.should contain("ByteBuilder cannot write a value of type Symbol")
   end
 
   it "rejects an unsupported value passed to put" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
+    output = compile_output(<<-'CRYSTAL')
+      b = ByteBuilder.new
       b.put({1, 2})
       CRYSTAL
     output.should contain("ByteBuilder cannot write a value of type Tuple(Int32, Int32)")
   end
 
-  it "rejects an unsupported runtime template argument" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      b.format(ByteBuilder::Template.new("{0}"), [1])
+  it "rejects a value that is not a template passed to <<" do
+    output = compile_output(<<-'CRYSTAL')
+      b = ByteBuilder.new
+      b << 5
       CRYSTAL
-    output.should contain("ByteBuilder cannot write a value of type Array(Int32)")
+    output.should contain("ByteBuilder#<< takes a value of a type declared with ByteBuilder.template, not Int32")
   end
 
-  it "reports a hint called with the wrong number of arguments" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      bbwrite b, "\#{int3(1, 2)}"
+  it "rejects a template that is not a string literal" do
+    output = compile_output(<<-'CRYSTAL')
+      TEXT = "x"
+      ByteBuilder.template Broken, TEXT
       CRYSTAL
-    output.should contain("appender 'int3' does not take 2 argument(s): its signatures are int3(value : Int32)")
+    output.should contain("ByteBuilder.template expects a string literal, not Path")
   end
 
-  it "reports a hint that collides with a method of the calling class" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      class Widget
-        def st
-          "mine"
-        end
-
-        def draw(b)
-          bbwrite b, "x\#{st}"
-        end
-      end
-      Widget.new.draw(b)
+  it "rejects a template without text" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, ""
       CRYSTAL
-    output.should contain("'st' is ambiguous: it names a ByteBuilder appender and a method available here")
-    output.should contain("Write b.st(...) for the appender, or (st(...)) for your own method.")
+    output.should contain("template 'Broken' has no text")
   end
 
-  it "reports a hint that collides with an inherited or class method" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      class Base
-        def int3(value)
-          value
-        end
-      end
-
-      class Child < Base
-        def draw(b)
-          bbwrite b, "\#{int3(1)}"
-        end
-      end
-      Child.new.draw(b)
+  it "rejects positional construction" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Move, "\e[#{row : Int32};#{col : Int32}H"
+      Move.new(1, 2)
       CRYSTAL
-    output.should contain("'int3' is ambiguous")
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      module Draw
-        def self.hex(value)
-          value
-        end
-
-        def self.run(b)
-          bbwrite b, "\#{hex(1_u8)}"
-        end
-      end
-      Draw.run(b)
-      CRYSTAL
-    output.should contain("'hex' is ambiguous")
+    output.should contain("missing arguments: row, col")
   end
 
-  it "reports a hint that collides with a top-level method" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      def pad(value, width)
-        value
-      end
-      bbwrite b, "\#{pad(1, 2)}"
+  it "rejects a hole that is not a typed field" do
+    output = compile_output(<<-'CRYSTAL')
+      row = 1
+      ByteBuilder.template Broken, "\e[#{row}H"
       CRYSTAL
-    output.should contain("'pad' is ambiguous")
+    output.should contain("a template field must be written as 'name : Type', not Var")
   end
 
-  it "reports a hint that collides with a file-private method" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      private def int3(value)
-        "mine"
-      end
-      bbwrite b, "\#{int3(1)}"
+  it "rejects a field declared twice" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{row : Int32};#{row : Int32}"
       CRYSTAL
-    output.should contain("'int3' is ambiguous: it names a ByteBuilder appender and a method available here")
-    compile_output(<<-CRYSTAL).should eq("")
-      #{PRELUDE}
-      private def int3(value)
-        "mine"
-      end
-      bbwrite b, "\#{(int3(1))}\#{b.int3(1)}\#{hex2(1_u8)}"
-      CRYSTAL
+    output.should contain("template 'Broken' declares the field 'row' twice")
   end
 
-  it "reports an each loop that collides with a method of the calling class" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      class Bag
-        include Enumerable(Int32)
-
-        def each(&)
-          yield 1
-        end
-
-        def draw(b)
-          bbwrite b, "\#{each([1]) { |n| "\#{n}" }}"
-        end
-      end
-      Bag.new.draw(b)
+  it "names a field type that has no encoding" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{ratio : Float64}"
       CRYSTAL
-    output.should contain("'each' is ambiguous: it is the bbwrite loop and a method available here")
-    compile_output(<<-CRYSTAL).should eq("")
-      #{PRELUDE}
-      class Bag
-        include Enumerable(Int32)
-
-        def each(&)
-          yield 1
-        end
-
-        def draw(b)
-          bbwrite b, "\#{b.each(self) { |n| "\#{n}" }}"
-        end
-      end
-      Bag.new.draw(b)
-      CRYSTAL
+    output.should contain("field 'ratio' has type Float64, which has no encoding")
   end
 
-  it "rejects malformed each loops" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      bbwrite b, "\#{each([1]) { |n| n.to_s }}"
+  it "rejects a union field" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{value : Int32 | Char}"
       CRYSTAL
-    output.should contain("the block of each must contain only a string literal")
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      bbwrite b, "\#{each([1], ",", 3) { |n| "x" }}"
-      CRYSTAL
-    output.should contain("each takes a collection and an optional separator")
+    output.should contain("field 'value' has the union type (Char | Int32), which has no encoding")
   end
 
-  it "rejects loops and unsized appenders where the size must be known" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      ByteBuilder.define listing(items), "[\#{each(items) { |item| "\#{item}" }}]"
-      b.listing([1])
+  it "rejects a format applied to a type it cannot encode" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{value : ByteBuilder::Hex(Int32)}"
       CRYSTAL
-    output.should contain("an each loop has no size known in advance")
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      flag = true
-      bbwrite b, "\#{"[\#{each([1]) { |n| "\#{n}" }}]" if flag}"
-      CRYSTAL
-    output.should contain("an each loop has no size known in advance")
+    output.should contain("field 'value': ByteBuilder::Hex cannot encode Int32: it accepts UInt8, UInt16, UInt32, UInt64")
   end
 
-  it "accepts the unambiguous spellings in a class that defines the same name" do
-    compile_output(<<-CRYSTAL).should eq("")
-      #{PRELUDE}
-      class Widget
-        def st
-          "mine"
-        end
-
-        def draw(b)
-          bbwrite b, "\#{(st)}\#{self.st}\#{b.st}\#{int3(1)}"
-        end
-      end
-      Widget.new.draw(b)
+  it "rejects a string that nothing ends" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{name : String}#{count : Int32}"
       CRYSTAL
+    output.should contain("field 'name' has no end: a String is read up to the literal text that follows it")
   end
 
-  it "rejects a template name that is already taken" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      ByteBuilder.define jump(row), "\\e[\#{row}H"
-      ByteBuilder.define jump(row, col), "\\e[\#{row};\#{col}H"
+  it "rejects two numbers with nothing between them" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{row : Int32}#{col : Int32}"
       CRYSTAL
-    output.should contain("ByteBuilder already has a method named 'jump'")
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      ByteBuilder.define str(row), "\#{row}"
-      CRYSTAL
-    output.should contain("ByteBuilder already has a method named 'str'")
+    output.should contain("field 'row' of template 'Broken' cannot be told apart from what follows it")
   end
 
-  it "rejects an appender without a size inside a defined template" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      class ByteBuilder
-        @[Appender]
-        def shout(value : String) : self
-          str(value.upcase)
-        end
-      end
-      ByteBuilder.define loud(text), "\#{shout(text)}!"
-      b.loud("x")
+  it "rejects a number followed by text that begins with a digit" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{row : Int32}0;"
       CRYSTAL
-    output.should contain("appender 'shout' reports no size, so it cannot be used inside ByteBuilder.define or inside a conditional branch")
+    output.should contain("field 'row' of template 'Broken' cannot be told apart from what follows it")
   end
 
-  it "rejects a field value of an unsupported type" do
-    output = compile_output(<<-CRYSTAL)
-      #{PRELUDE}
-      bbwrite b, "\#{field(",c=", [1])}"
+  it "rejects a number followed by a string or a character" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{row : Int32}#{mark : Char}"
       CRYSTAL
-    output.should contain("bound_field")
-    output.should contain("Array(Int32)")
+    output.should contain("field 'row' of template 'Broken' cannot be told apart from what follows it")
   end
 
-  it "accepts a valid reading program" do
-    compile_output(<<-CRYSTAL).should eq("")
-      r = ByteBuilder::Reader.new("")
-      if bbread r, "\\e[\#{row : Int32};\#{col = hex(UInt8)}H\#{csi}\#{label : String}"
-        row + col + label.bytesize
-      end
-      r.scan?(ByteBuilder::Template.new("{0}"), Int32)
+  it "rejects an optional string" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{name : String?};"
       CRYSTAL
+    output.should contain("field 'name' cannot be optional: a missing String cannot be told apart from an empty one")
   end
 
-  it "rejects a variable as the reading template" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      template = "x"
-      bbread r, template
+  it "rejects an optional field that looks like what follows it" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Title, ";#{text : String}"
+      ByteBuilder.template Broken, "#{title : Title?};"
       CRYSTAL
-    output.should contain("bbread expects a string literal or a constant holding one, not Var")
+    output.should contain("field 'title' of template 'Broken' cannot be told apart from what follows it")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{row : Int32?}#{col : Int32}"
+      CRYSTAL
+    output.should contain("field 'row' of template 'Broken' cannot be told apart from what follows it")
   end
 
-  it "rejects a hole that is not a declaration or a parser" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{1 + 2}"
+  it "checks a nested template against what follows it" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Tag, ":#{value : Int32}"
+      ByteBuilder.template Inner, "#{count : Int32}#{tag : Tag?}"
+      ByteBuilder.template Broken, "#{inner : Inner}:"
       CRYSTAL
-    output.should contain("a bbread hole must be 'name : Type', 'name = parser(...)' or a parser call, not Call")
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{true ? "a" : "b"}"
-      CRYSTAL
-    output.should contain("a bbread hole must be 'name : Type', 'name = parser(...)' or a parser call, not If")
+    output.should contain("field 'inner' of template 'Broken' cannot be told apart from what follows it")
   end
 
-  it "names an unknown parser" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{value = float(Float64)}"
+  it "rejects lists whose items or separator cannot be read back" do
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Semi, ";"
+      ByteBuilder.template Broken, "#{names : ByteBuilder::List(String, Semi)}"
       CRYSTAL
-    output.should contain("ByteBuilder::Reader has no parser named 'float'")
-  end
-
-  it "reports a parser called with the wrong number of arguments" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{value = take(1, 2)}"
+    output.should contain("field 'names' cannot be a list of String")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Broken, "#{values : ByteBuilder::List(Int32, Int32)}"
       CRYSTAL
-    output.should contain("parser 'take' does not take 2 argument(s): its signatures are take(count : Int32)")
-  end
-
-  it "rejects assigning from a parser that only matches" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{value = csi}"
+    output.should contain("the separator of field 'values' must be a template made only of literal text, not Int32")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Zero, "0"
+      ByteBuilder.template Broken, "#{values : ByteBuilder::List(Int32, Zero)}"
       CRYSTAL
-    output.should contain("parser 'csi' only matches text and has no value to assign")
-  end
-
-  it "rejects a string hole with no literal after it" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{name : String}\#{count : Int32}"
+    output.should contain("items of field 'values' run into their separator")
+    output = compile_output(<<-'CRYSTAL')
+      ByteBuilder.template Semi, ";"
+      ByteBuilder.template Broken, "#{values : ByteBuilder::List(Int32, Semi)};"
       CRYSTAL
-    output.should contain("'name' has no end: a String hole reads up to the literal text that follows it")
-  end
-
-  it "names an unsupported hole type" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      bbread r, "\#{value : Float64}"
-      CRYSTAL
-    output.should contain("ByteBuilder::Reader cannot read a value of type Float64")
-  end
-
-  it "names an unsupported scan type" do
-    output = compile_output(<<-CRYSTAL)
-      r = ByteBuilder::Reader.new("")
-      r.scan?(ByteBuilder::Template.new("{0}"), Array(Int32))
-      CRYSTAL
-    output.should contain("ByteBuilder::Reader cannot read a value of type Array(Int32)")
+    output.should contain("field 'values' of template 'Broken' cannot be told apart from what follows it")
   end
 end

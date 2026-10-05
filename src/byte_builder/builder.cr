@@ -1,8 +1,5 @@
 # src/byte_builder/builder.cr
 class ByteBuilder
-  annotation Appender
-  end
-
   MAX_CAPACITY = Int32::MAX
   FLOAT_BOUND  = 32
 
@@ -27,7 +24,6 @@ class ByteBuilder
       self
     end
 
-    @[::ByteBuilder::Appender(max: {{max}})]
     @[AlwaysInline]
     def {{signature.name}}({{signature.args.splat}}) : self
       reserve({{max}})
@@ -47,7 +43,6 @@ class ByteBuilder
       self
     end
 
-    @[::ByteBuilder::Appender(sized: true)]
     @[AlwaysInline]
     def {{signature.name}}({{signature.args.splat}}) : self
       reserve(::ByteBuilder.bound_{{signature.name}}({{signature.args.map(&.var).splat}}))
@@ -100,39 +95,6 @@ class ByteBuilder
     @buf = Pointer(UInt8).malloc(@cap)
     @pos = 0
     @io  = nil
-  end
-
-  @[AlwaysInline]
-  def self.bind(builder : ByteBuilder, values : Tuple, &) : ByteBuilder
-    yield builder, values
-    builder
-  end
-
-  struct Else(T)
-    getter values : T
-
-    def initialize(@values : T)
-    end
-  end
-
-  @[AlwaysInline]
-  def self.on_then(values : Tuple, &) : Int32
-    yield values
-  end
-
-  @[AlwaysInline]
-  def self.on_then(values : Else | Nil, &) : Int32
-    0
-  end
-
-  @[AlwaysInline]
-  def self.on_else(values : Else, &) : Int32
-    yield values.values
-  end
-
-  @[AlwaysInline]
-  def self.on_else(values : Tuple | Nil, &) : Int32
-    0
   end
 
   @[AlwaysInline]
@@ -323,7 +285,6 @@ class ByteBuilder
     unsafe_bytes(value.to_slice)
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def bytes(value : StaticArray(UInt8, N)) : self forall N
     bytes(value.to_slice)
@@ -380,7 +341,11 @@ class ByteBuilder
     unsafe_int(value)
   end
 
-  value UInt8 | UInt16 | UInt32, 10 do
+  value UInt8, 3 do
+    unsafe_int3(value.to_i32!)
+  end
+
+  value UInt16 | UInt32, 10 do
     unsafe_int(value)
   end
 
@@ -435,7 +400,6 @@ class ByteBuilder
     self
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def field(prefix : String, value : Nil) : self
     self

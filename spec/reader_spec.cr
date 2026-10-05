@@ -25,6 +25,19 @@ describe ByteBuilder::Reader do
     expect_raises(ArgumentError, "cannot move to 4: the input has 3 bytes") { r.pos = 4 }
   end
 
+  it "is shared by reference and can be pointed at new input" do
+    r       = reader("12;34")
+    advance = ->(shared : ByteBuilder::Reader) { shared.int(Int32) }
+    advance.call(r).should eq(12)
+    r.pos.should eq(2)
+    r.reset("7")
+    r.size.should eq(1)
+    r.int(Int32).should eq(7)
+    r.reset("89".to_slice)
+    r.int(Int32).should eq(89)
+    r.eof?.should be_true
+  end
+
   it "reads UTF-8 characters and rejects malformed ones" do
     r = reader("aé€😀")
     r.char.should eq('a')

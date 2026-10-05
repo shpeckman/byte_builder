@@ -1,9 +1,6 @@
 # src/byte_builder/reader.cr
 class ByteBuilder
-  struct Reader
-    annotation Parser
-    end
-
+  class Reader
     class Error < Exception
       getter position : Int32
 
@@ -12,15 +9,12 @@ class ByteBuilder
       end
     end
 
-    DELIMITED = {String, Bytes}
-
     HEX_VALUES = Bytes.new(256, 0xFF_u8).tap do |table|
       HEX_DIGITS.each_with_index { |char, index| table[char] = index.to_u8 }
       (0x41_u8..0x46_u8).each { |char| table[char] = char - 55_u8 }
     end
 
     private macro parser(signature, result, expected, &block)
-      @[::ByteBuilder::Reader::Parser]
       def {{signature.name}}?({{signature.args.splat}}) : {{result}}?
         {{block.body}}
       end
@@ -33,7 +27,6 @@ class ByteBuilder
     end
 
     private macro matcher(signature, expected, &block)
-      @[::ByteBuilder::Reader::Parser(match: true)]
       def {{signature.name}}?({{signature.args.splat}}) : Bool
         {{block.body}}
       end
@@ -45,7 +38,6 @@ class ByteBuilder
     end
 
     private macro typed(type, &block)
-      @[::ByteBuilder::Reader::Parser]
       @[AlwaysInline]
       def read?(type : {{type}}.class, before : Bytes? = nil) : {{type}}?
         {{block.body}}
@@ -64,6 +56,21 @@ class ByteBuilder
 
     def self.new(data : String) : self
       new(data.to_slice)
+    end
+
+    def self.index(data : Bytes, pattern : Bytes) : Int32?
+      return 0 if pattern.empty?
+      first = pattern.unsafe_fetch(0)
+      last  = data.size - pattern.size
+      index = 0
+      while index <= last
+        offset = data[index, last - index + 1].index(first)
+        return nil unless offset
+        index += offset
+        return index if (data.to_unsafe + index).memcmp(pattern.to_unsafe, pattern.size) == 0
+        index += 1
+      end
+      nil
     end
 
     @[AlwaysInline]
@@ -106,6 +113,16 @@ class ByteBuilder
     @[AlwaysInline]
     def reset : Nil
       @pos = 0
+    end
+
+    def reset(data : Bytes) : Nil
+      @buf  = data.to_unsafe
+      @size = data.size
+      @pos  = 0
+    end
+
+    def reset(data : String) : Nil
+      reset(data.to_slice)
     end
 
     @[AlwaysInline]
@@ -218,7 +235,7 @@ class ByteBuilder
     end
 
     parser take_until(delimiter : Bytes), Bytes, "a terminator" do
-      index = find(delimiter)
+      index = Reader.index(rest, delimiter)
       index ? take?(index) : nil
     end
 
@@ -226,7 +243,6 @@ class ByteBuilder
       take_until?(delimiter.to_slice)
     end
 
-    @[Parser]
     def take_while(& : UInt8 -> Bool) : Bytes
       index = @pos
       while index < @size && (yield @buf[index])
@@ -237,14 +253,12 @@ class ByteBuilder
       value
     end
 
-    @[Parser]
     def take_rest : Bytes
       value = rest
       @pos  = @size
       value
     end
 
-    @[Parser]
     def base64 : Bytes
       index = @pos
       while index < @size && BASE64_VALUES.unsafe_fetch(@buf[index]) < 64
@@ -335,21 +349,6 @@ class ByteBuilder
     def read(type : T.class, before : Bytes? = nil) : T forall T
       value = read?(type, before)
       value.nil? ? fail("a value of type #{T}") : value
-    end
-
-    private def find(needle : Bytes) : Int32?
-      return 0 if needle.empty?
-      first = needle.unsafe_fetch(0)
-      last  = @size - needle.size
-      index = @pos
-      while index <= last
-        offset = Slice.new(@buf + index, last - index + 1).index(first)
-        return nil unless offset
-        index += offset
-        return index - @pos if (@buf + index).memcmp(needle.to_unsafe, needle.size) == 0
-        index += 1
-      end
-      nil
     end
 
     private def fail(expected : String) : NoReturn

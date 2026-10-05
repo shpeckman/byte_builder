@@ -1,11 +1,17 @@
 # bench/sequences.cr
 require "./bench_helper"
 
-ByteBuilder.define bench_cell(row, col, r, name), "\e[#{row};#{col}H\e[38;2;#{int3(r)};#{int3(r)};#{int3(r)}m#{name}"
+ByteBuilder.template BenchMove, "\e[#{row : Int32};#{col : Int32}H"
 
-ByteBuilder.define bench_move(row, col), "\e[#{row};#{col}H"
+ByteBuilder.template BenchCell, "\e[#{row : Int32};#{col : Int32}H\e[38;2;#{red : UInt8};#{green : UInt8};#{blue : UInt8}m#{name : String}"
 
-CELL_TEMPLATE = ByteBuilder::Template.new("\e[{0};{1}H\e[38;2;{2:int3};{2:int3};{2:int3}m{3}")
+ByteBuilder.template BenchNestedCell, "#{at : BenchMove}\e[38;2;#{red : UInt8};#{green : UInt8};#{blue : UInt8}m#{name : String}"
+
+ByteBuilder.template BenchColumns, "c=#{value : Int32},"
+
+ByteBuilder.template BenchRows, "r=#{value : Int32},"
+
+ByteBuilder.template BenchControl, "\e_Ga=p,i=#{id : Int32},#{columns : BenchColumns?}#{rows : BenchRows?}z=#{layer : Int32}\e\\"
 
 rows   = Array.new(Bench::BATCH * 2) { |i| (i * 7) % 200 + 1 }
 name   = "label"
@@ -44,51 +50,23 @@ Bench.group("cursor move and rgb colour, #{Bench::BATCH} per iteration") do |job
     end
     Bench.keep(b)
   end
-  job.report("bbwrite") do
+  job.report("template") do
     b.reset
     Bench::BATCH.times do |i|
       row = rows.unsafe_fetch(i)
       col = rows.unsafe_fetch(i + Bench::BATCH)
-      r   = col & 255
-      bbwrite b, "\e[#{row};#{col}H\e[38;2;#{r};#{r};#{r}m#{name}"
+      r   = (col & 255).to_u8!
+      b << BenchCell.new(row: row, col: col, red: r, green: r, blue: r, name: name)
     end
     Bench.keep(b)
   end
-  job.report("bbwrite with int3 hints") do
+  job.report("template nesting a template") do
     b.reset
     Bench::BATCH.times do |i|
       row = rows.unsafe_fetch(i)
       col = rows.unsafe_fetch(i + Bench::BATCH)
-      r   = col & 255
-      bbwrite b, "\e[#{row};#{col}H\e[38;2;#{int3(r)};#{int3(r)};#{int3(r)}m#{name}"
-    end
-    Bench.keep(b)
-  end
-  job.report("defined template") do
-    b.reset
-    Bench::BATCH.times do |i|
-      row = rows.unsafe_fetch(i)
-      col = rows.unsafe_fetch(i + Bench::BATCH)
-      b.bench_cell(row, col, col & 255, name)
-    end
-    Bench.keep(b)
-  end
-  job.report("bbwrite nesting a defined template") do
-    b.reset
-    Bench::BATCH.times do |i|
-      row = rows.unsafe_fetch(i)
-      col = rows.unsafe_fetch(i + Bench::BATCH)
-      r   = col & 255
-      bbwrite b, "#{bench_move(row, col)}\e[38;2;#{int3(r)};#{int3(r)};#{int3(r)}m#{name}"
-    end
-    Bench.keep(b)
-  end
-  job.report("runtime template") do
-    b.reset
-    Bench::BATCH.times do |i|
-      row = rows.unsafe_fetch(i)
-      col = rows.unsafe_fetch(i + Bench::BATCH)
-      b.format(CELL_TEMPLATE, row, col, col & 255, name)
+      r   = (col & 255).to_u8!
+      b << BenchNestedCell.new(at: BenchMove.new(row: row, col: col), red: r, green: r, blue: r, name: name)
     end
     Bench.keep(b)
   end
@@ -115,19 +93,11 @@ Bench.group("control string with optional fields, #{Bench::BATCH} per iteration"
     end
     Bench.keep(b)
   end
-  job.report("bbwrite with conditional branches") do
+  job.report("template with optional fields") do
     b.reset
     Bench::BATCH.times do |i|
       columns = rows.unsafe_fetch(i)
-      bbwrite b, "\e_Ga=p,i=#{i}#{",c=#{columns}" if columns}#{",r=#{absent}" if absent},z=#{columns}\e\\"
-    end
-    Bench.keep(b)
-  end
-  job.report("bbwrite with field hints") do
-    b.reset
-    Bench::BATCH.times do |i|
-      columns = rows.unsafe_fetch(i)
-      bbwrite b, "\e_Ga=p,i=#{i}#{field(",c=", columns)}#{field(",r=", absent)}#{field(",z=", columns)}\e\\"
+      b << BenchControl.new(id: i, columns: BenchColumns.new(value: columns), rows: nil, layer: columns)
     end
     Bench.keep(b)
   end
@@ -150,11 +120,6 @@ Bench.group("separated list of 8 strings, #{Bench::BATCH} per iteration") do |jo
       end
       b.st
     end
-    Bench.keep(b)
-  end
-  job.report("bbwrite with each") do
-    b.reset
-    Bench::BATCH.times { bbwrite b, "\e]52;#{each(mimes, ' ') { |mime| "#{mime}" }}\e\\" }
     Bench.keep(b)
   end
 end

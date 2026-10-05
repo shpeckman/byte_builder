@@ -88,14 +88,12 @@ class ByteBuilder
     unsafe_base64(data.to_slice)
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def base64(data : Bytes) : self
     reserve(::ByteBuilder.bound_base64(data))
     unsafe_base64(data)
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def base64(data : String) : self
     base64(data.to_slice)
@@ -161,14 +159,12 @@ class ByteBuilder
     unsafe_decode64(data.to_slice)
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def decode64(data : Bytes) : self
     reserve(::ByteBuilder.bound_decode64(data))
     unsafe_decode64(data)
   end
 
-  @[Appender(sized: true)]
   @[AlwaysInline]
   def decode64(data : String) : self
     decode64(data.to_slice)

@@ -1,144 +1,173 @@
 # spec/template_spec.cr
 require "./spec_helper"
 
-describe ByteBuilder::Template do
-  it "fills positional placeholders" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("\e[{0};{1}H{2}")
-    template.arity.should eq(3)
-    builder.format(template, 12, 40, "label").format(template, 1_u8, -2_i64, 'c')
-    text(builder).should eq("\e[12;40Hlabel\e[1;-2Hc")
-  end
+module TemplateSpec
+  ByteBuilder.template Semi, ";"
+  ByteBuilder.template Cursor, "\e[#{row : Int32};#{col : Int32}H"
+  ByteBuilder.template Color, "##{red : ByteBuilder::Hex2}#{green : ByteBuilder::Hex2}#{blue : ByteBuilder::Hex2}"
+  ByteBuilder.template Title, ";#{text : String}"
+  ByteBuilder.template Cell, "#{at : Cursor}#{color : Color}#{title : Title?}\e\\"
+  ByteBuilder.template Style, "\e[#{params : ByteBuilder::List(UInt8, Semi)}m"
+  ByteBuilder.template Path, "#{points : ByteBuilder::List(Cursor, Semi)}."
+  ByteBuilder.template Stamp, "#{year : ByteBuilder::Padded(Int32, 4)}-#{month : ByteBuilder::Padded(UInt8, 2)} #{mask : ByteBuilder::Hex(UInt32)}"
+  ByteBuilder.template Payload, "\e]52;#{text : ByteBuilder::Base64(String)};#{raw : ByteBuilder::Base64(Bytes)}\a"
+  ByteBuilder.template Pair, "#{key : Bytes}=#{value : String}"
+  ByteBuilder.template Line, "<#{pair : Pair}>#{mark : Char}#{level : UInt8}"
+  ByteBuilder.template Wide, "#{small : Int8},#{large : UInt128},#{signed : Int64}"
+end
 
-  it "applies named formats" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("{0:int3}/{1:int2}/{2:hex}/{3:hex2}/{4:base64}/{5:plain}")
-    builder.format(template, 255, 9, 0xbeef_u32, 0x0a_u8, "hi", 1.5)
-    text(builder).should eq("255/9/beef/0a/aGk=/1.5")
-    builder.reset
-    builder.format(template, 7, 42, 0_u8, 0xff_u8, "hello".to_slice, nil)
-    text(builder).should eq("7/42/0/ff/aGVsbG8=/")
-  end
+private def round_trip(value : T) : T forall T
+  builder = ByteBuilder.new(16)
+  builder << value
+  reader = ByteBuilder::Reader.new(builder.written)
+  result = T.read(reader)
+  reader.eof?.should be_true
+  result
+end
 
-  it "reuses arguments, skips unused ones, and keeps literal braces" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("{{{1}}}-{1}-{{literal}}-{3}")
-    template.arity.should eq(4)
-    builder.format(template, "unused", "x", :ignored.to_s, true)
-    text(builder).should eq("{x}-x-{literal}-true")
-  end
-
-  it "handles templates without placeholders or without literals" do
+describe "ByteBuilder.template" do
+  it "writes a value and reads it back" do
     builder = ByteBuilder.new(16)
-    builder.format(ByteBuilder::Template.new("plain é text"))
-    builder.format(ByteBuilder::Template.new(""))
-    builder.format(ByteBuilder::Template.new("{0}{1}"), 1, 2)
-    text(builder).should eq("plain é text12")
-  end
-
-  it "reserves once for long arguments" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("<{0}|{1:base64}|{0}>")
-    long     = "z" * 4000
-    20.times { builder.format(template, long, long) }
-    text(builder).should eq("<#{long}|#{Base64.strict_encode(long)}|#{long}>" * 20)
-    builder.capacity.should be >= builder.pos
-  end
-
-  it "rejects malformed templates" do
-    expect_raises(ArgumentError, "unclosed '{'") { ByteBuilder::Template.new("a{0") }
-    expect_raises(ArgumentError, "unmatched '}'") { ByteBuilder::Template.new("a}b") }
-    expect_raises(ArgumentError, "needs an argument index") { ByteBuilder::Template.new("{name}") }
-    expect_raises(ArgumentError, "needs an argument index") { ByteBuilder::Template.new("{}") }
-    expect_raises(ArgumentError, "needs an argument index") { ByteBuilder::Template.new("{-1}") }
-    expect_raises(ArgumentError, "unknown format 'octal'") { ByteBuilder::Template.new("{0:octal}") }
-  end
-
-  it "rejects missing or mistyped arguments without writing" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("{0:int3}{1:hex}{2:hex2}{3:base64}")
-    builder.str("ok")
-    expect_raises(ArgumentError, "needs 4 argument(s), got 2") { builder.format(template, 1, 2_u8) }
-    expect_raises(ArgumentError, "int2 and int3 need an Int32") { builder.format(template, "1", 2_u8, 3_u8, "x") }
-    expect_raises(ArgumentError, "hex needs an unsigned") { builder.format(template, 1, 2, 3_u8, "x") }
-    expect_raises(ArgumentError, "hex2 needs a UInt8") { builder.format(template, 1, 2_u8, 3, "x") }
-    expect_raises(ArgumentError, "base64 needs a String or Bytes") { builder.format(template, 1, 2_u8, 3_u8, 4) }
-    text(builder).should eq("ok")
-  end
-
-  it "works as a hint inside bbwrite" do
-    builder  = ByteBuilder.new(16)
-    template = ByteBuilder::Template.new("[{0}:{1}]")
-    row      = 3
-    bbwrite builder, "<#{format(template, row, "x" * 50)}>#{row}"
-    text(builder).should eq("<[3:#{"x" * 50}]>3")
-  end
-
-  it "scans typed captures back out of text" do
-    template = ByteBuilder::Template.new("\e[{0};{1}H{2}|{3}")
-    reader   = ByteBuilder::Reader.new("\e[12;40Hlabel|é")
-    captures = reader.scan(template, Int32, UInt8, String, Char)
-    typeof(captures).should eq(Tuple(Int32, UInt8, String, Char))
-    captures.should eq({12, 40_u8, "label", 'é'})
-    reader.eof?.should be_true
-  end
-
-  it "scans named formats" do
-    template = ByteBuilder::Template.new("{0:int3}/{1:int2}/{2:hex}/{3:hex2}/{4:base64}/{5:plain}")
-    builder  = ByteBuilder.new(16)
-    builder.format(template, 255, 9, 0xbeef_u32, 0x0a_u8, "hi", "tail")
+    cursor  = TemplateSpec::Cursor.new(row: 12, col: 40)
+    builder << cursor << TemplateSpec::Cursor.new(col: -2, row: 1)
+    text(builder).should eq("\e[12;40H\e[1;-2H")
     reader = ByteBuilder::Reader.new(builder.written)
-    value  = reader.scan?(template, Int32, Int32, UInt32, UInt8, String, Bytes)
-    value.should_not be_nil
-    if value
-      value[0].should eq(255)
-      value[1].should eq(9)
-      value[2].should eq(0xbeef_u32)
-      value[3].should eq(0x0a_u8)
-      value[4].should eq("aGk=")
-      String.new(value[5]).should eq("tail")
-    end
-  end
-
-  it "restores the cursor when a scan fails" do
-    template = ByteBuilder::Template.new("<{0};{1}>")
-    reader   = ByteBuilder::Reader.new("x<1;2]<3;4>")
-    reader.byte
-    reader.scan?(template, Int32, Int32).should be_nil
-    reader.pos.should eq(1)
-    expect_raises(ByteBuilder::Reader::Error, "expected text matching the template at byte 1") do
-      reader.scan(template, Int32, Int32)
-    end
-    reader.take(5)
-    reader.scan?(template, Int32, Int32).should eq({3, 4})
-  end
-
-  it "scans templates without placeholders and repeated placeholders" do
-    reader = ByteBuilder::Reader.new("plain1-2")
-    reader.scan?(ByteBuilder::Template.new("plain")).should eq(Tuple.new)
-    reader.scan?(ByteBuilder::Template.new("{0}-{0}"), Int32).should eq({2})
+    first  = TemplateSpec::Cursor.read(reader)
+    first.should eq(cursor)
+    first.row.should eq(12)
+    first.col.should eq(40)
+    TemplateSpec::Cursor.read?(reader).should eq(TemplateSpec::Cursor.new(row: 1, col: -2))
+    TemplateSpec::Cursor.read?(reader).should be_nil
     reader.eof?.should be_true
   end
 
-  it "rejects scans whose types do not fit the template" do
-    reader = ByteBuilder::Reader.new("1 2")
-    expect_raises(ArgumentError, "template needs 2 type(s), got 1") do
-      reader.scan?(ByteBuilder::Template.new("{0} {1}"), Int32)
+  it "restores the cursor and leaves nothing behind when reading fails" do
+    reader = ByteBuilder::Reader.new("x\e[12;40Q")
+    reader.byte
+    TemplateSpec::Cursor.read?(reader).should be_nil
+    reader.pos.should eq(1)
+    error = expect_raises(ByteBuilder::Reader::Error, "expected TemplateSpec::Cursor at byte 1") do
+      TemplateSpec::Cursor.read(reader)
     end
-    expect_raises(ArgumentError, "template has no placeholder for argument 0") do
-      reader.scan?(ByteBuilder::Template.new("1 {1}"), Int32, Int32)
+    error.position.should eq(1)
+  end
+
+  it "encodes fields through format types" do
+    builder = ByteBuilder.new(16)
+    stamp   = TemplateSpec::Stamp.new(year: 7, month: 3_u8, mask: 0xbeef_u32)
+    builder << stamp << TemplateSpec::Color.new(red: 255_u8, green: 128_u8, blue: 0_u8)
+    text(builder).should eq("0007-03 beef#ff8000")
+    reader = ByteBuilder::Reader.new(builder.written)
+    TemplateSpec::Stamp.read(reader).should eq(stamp)
+    TemplateSpec::Color.read(reader).green.should eq(128_u8)
+    round_trip(TemplateSpec::Stamp.new(year: -12345, month: 255_u8, mask: UInt32::MAX)).year.should eq(-12345)
+  end
+
+  it "rejects padded numbers that are too short" do
+    TemplateSpec::Stamp.read?(ByteBuilder::Reader.new("0007-03 0")).should_not be_nil
+    TemplateSpec::Stamp.read?(ByteBuilder::Reader.new("007-03 0")).should be_nil
+    TemplateSpec::Stamp.read?(ByteBuilder::Reader.new("0007-3 0")).should be_nil
+    TemplateSpec::Stamp.read?(ByteBuilder::Reader.new("-0007-03 0")).should_not be_nil
+  end
+
+  it "encodes and decodes base64 fields" do
+    builder = ByteBuilder.new(16)
+    payload = TemplateSpec::Payload.new(text: "hello", raw: Bytes[0, 255, 16])
+    builder << payload << TemplateSpec::Payload.new(text: "", raw: Bytes.empty)
+    text(builder).should eq("\e]52;aGVsbG8=;AP8Q\a\e]52;;\a")
+    reader = ByteBuilder::Reader.new(builder.written)
+    first  = TemplateSpec::Payload.read(reader)
+    first.text.should eq("hello")
+    first.raw.should eq(Bytes[0, 255, 16])
+    TemplateSpec::Payload.read(reader).text.should eq("")
+    TemplateSpec::Payload.read?(ByteBuilder::Reader.new("\e]52;aGVsb;AP8Q\a")).should be_nil
+  end
+
+  it "writes nothing for a missing optional field and reads it back as nil" do
+    at      = TemplateSpec::Cursor.new(row: 1, col: 2)
+    color   = TemplateSpec::Color.new(red: 1_u8, green: 2_u8, blue: 3_u8)
+    titled  = TemplateSpec::Cell.new(at: at, color: color, title: TemplateSpec::Title.new(text: "né; x"))
+    plain   = TemplateSpec::Cell.new(at: at, color: color, title: nil)
+    builder = ByteBuilder.new(16)
+    builder << titled << plain
+    text(builder).should eq("\e[1;2H#010203;né; x\e\\\e[1;2H#010203\e\\")
+    reader = ByteBuilder::Reader.new(builder.written)
+    TemplateSpec::Cell.read(reader).should eq(titled)
+    second = TemplateSpec::Cell.read(reader)
+    second.title.should be_nil
+    second.at.col.should eq(2)
+    reader.eof?.should be_true
+  end
+
+  it "writes and reads lists with their separator" do
+    builder = ByteBuilder.new(16)
+    builder << TemplateSpec::Style.new(params: [] of UInt8) << TemplateSpec::Style.new(params: [7_u8]) << TemplateSpec::Style.new(params: [1_u8, 38_u8, 255_u8])
+    text(builder).should eq("\e[m\e[7m\e[1;38;255m")
+    reader = ByteBuilder::Reader.new(builder.written)
+    TemplateSpec::Style.read(reader).params.empty?.should be_true
+    TemplateSpec::Style.read(reader).params.should eq([7_u8])
+    TemplateSpec::Style.read(reader).params.should eq([1_u8, 38_u8, 255_u8])
+    TemplateSpec::Style.read?(ByteBuilder::Reader.new("\e[1;m")).should be_nil
+    TemplateSpec::Style.read?(ByteBuilder::Reader.new("\e[256m")).should be_nil
+    points = [TemplateSpec::Cursor.new(row: 1, col: 2), TemplateSpec::Cursor.new(row: 3, col: 4)]
+    round_trip(TemplateSpec::Path.new(points: points)).points.should eq(points)
+  end
+
+  it "reads strings and bytes up to the text that follows them, or to the end" do
+    builder = ByteBuilder.new(16)
+    builder << TemplateSpec::Line.new(pair: TemplateSpec::Pair.new(key: "key".to_slice, value: "a=b"), mark: 'é', level: 255_u8)
+    text(builder).should eq("<key=a=b>é255")
+    reader = ByteBuilder::Reader.new(builder.written)
+    line   = TemplateSpec::Line.read(reader)
+    String.new(line.pair.key).should eq("key")
+    line.pair.value.should eq("a=b")
+    line.mark.should eq('é')
+    line.level.should eq(255_u8)
+    pair = TemplateSpec::Pair.read(ByteBuilder::Reader.new("=rest > of it"))
+    pair.key.empty?.should be_true
+    pair.value.should eq("rest > of it")
+  end
+
+  it "refuses to write a string that contains the text that ends it" do
+    builder = ByteBuilder.new(16)
+    builder << TemplateSpec::Cursor.new(row: 1, col: 1)
+    expect_raises(ArgumentError, %("k=v" contains "=", the text that ends it)) do
+      builder << TemplateSpec::Pair.new(key: "k=v".to_slice, value: "x")
     end
-    expect_raises(ArgumentError, "formats int2 and int3 read an Int32, not String") do
-      reader.scan?(ByteBuilder::Template.new("{0:int2}"), String)
+    expect_raises(ArgumentError, %("a>b" contains ">", the text that ends it)) do
+      builder << TemplateSpec::Line.new(pair: TemplateSpec::Pair.new(key: "k".to_slice, value: "a>b"), mark: 'x', level: 0_u8)
     end
-    expect_raises(ArgumentError, "format hex reads an unsigned integer, not Int32") do
-      reader.scan?(ByteBuilder::Template.new("{0:hex}"), Int32)
-    end
-    expect_raises(ArgumentError, "format hex2 reads a UInt8, not UInt16") do
-      reader.scan?(ByteBuilder::Template.new("{0:hex2}"), UInt16)
-    end
-    expect_raises(ArgumentError, "format base64 reads a String or Bytes, not Int32") do
-      reader.scan?(ByteBuilder::Template.new("{0:base64}"), Int32)
-    end
+    text(builder).should eq("\e[1;1H")
+  end
+
+  it "handles every integer width and literal-only templates" do
+    wide = TemplateSpec::Wide.new(small: Int8::MIN, large: UInt128::MAX, signed: Int64::MIN)
+    round_trip(wide).should eq(wide)
+    builder = ByteBuilder.new(16)
+    builder << TemplateSpec::Semi.new << TemplateSpec::Semi.new
+    text(builder).should eq(";;")
+    reader = ByteBuilder::Reader.new(";x")
+    TemplateSpec::Semi.read?(reader).should eq(TemplateSpec::Semi.new)
+    TemplateSpec::Semi.read?(reader).should be_nil
+  end
+
+  it "reserves once for a value larger than the buffer" do
+    builder = ByteBuilder.new(16)
+    title   = TemplateSpec::Title.new(text: "x" * 500)
+    builder << title
+    builder.pos.should eq(501)
+    TemplateSpec::Title.bound(title).should eq(501)
+    round_trip(title).should eq(title)
+  end
+
+  it "reads many values through one reused reader" do
+    reader = ByteBuilder::Reader.new("\e[1;2H")
+    TemplateSpec::Cursor.read(reader).row.should eq(1)
+    reader.reset("\e[3;4H")
+    TemplateSpec::Cursor.read(reader).row.should eq(3)
+    reader.reset("\e[5;6H".to_slice)
+    TemplateSpec::Cursor.read(reader).col.should eq(6)
+    reader.reset
+    reader.pos.should eq(0)
   end
 end
