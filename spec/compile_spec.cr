@@ -270,4 +270,84 @@ describe "compile-time checks" do
     output.should contain("bound_field")
     output.should contain("Array(Int32)")
   end
+
+  it "accepts a valid reading program" do
+    compile_output(<<-CRYSTAL).should eq("")
+      r = ByteBuilder::Reader.new("")
+      if bbread r, "\\e[\#{row : Int32};\#{col = hex(UInt8)}H\#{csi}\#{label : String}"
+        row + col + label.bytesize
+      end
+      r.scan?(ByteBuilder::Template.new("{0}"), Int32)
+      CRYSTAL
+  end
+
+  it "rejects a variable as the reading template" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      template = "x"
+      bbread r, template
+      CRYSTAL
+    output.should contain("bbread expects a string literal or a constant holding one, not Var")
+  end
+
+  it "rejects a hole that is not a declaration or a parser" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{1 + 2}"
+      CRYSTAL
+    output.should contain("a bbread hole must be 'name : Type', 'name = parser(...)' or a parser call, not Call")
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{true ? "a" : "b"}"
+      CRYSTAL
+    output.should contain("a bbread hole must be 'name : Type', 'name = parser(...)' or a parser call, not If")
+  end
+
+  it "names an unknown parser" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{value = float(Float64)}"
+      CRYSTAL
+    output.should contain("ByteBuilder::Reader has no parser named 'float'")
+  end
+
+  it "reports a parser called with the wrong number of arguments" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{value = take(1, 2)}"
+      CRYSTAL
+    output.should contain("parser 'take' does not take 2 argument(s): its signatures are take(count : Int32)")
+  end
+
+  it "rejects assigning from a parser that only matches" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{value = csi}"
+      CRYSTAL
+    output.should contain("parser 'csi' only matches text and has no value to assign")
+  end
+
+  it "rejects a string hole with no literal after it" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{name : String}\#{count : Int32}"
+      CRYSTAL
+    output.should contain("'name' has no end: a String hole reads up to the literal text that follows it")
+  end
+
+  it "names an unsupported hole type" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      bbread r, "\#{value : Float64}"
+      CRYSTAL
+    output.should contain("ByteBuilder::Reader cannot read a value of type Float64")
+  end
+
+  it "names an unsupported scan type" do
+    output = compile_output(<<-CRYSTAL)
+      r = ByteBuilder::Reader.new("")
+      r.scan?(ByteBuilder::Template.new("{0}"), Array(Int32))
+      CRYSTAL
+    output.should contain("ByteBuilder::Reader cannot read a value of type Array(Int32)")
+  end
 end

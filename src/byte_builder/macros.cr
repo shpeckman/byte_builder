@@ -250,4 +250,62 @@ class ByteBuilder
       end
     end
   end
+
+  macro match(reader, text)
+    {% source = text.is_a?(Path) ? text.resolve : text %}
+    {% unless source.is_a?(StringInterpolation) || source.is_a?(StringLiteral) %}
+      {% text.raise "bbread expects a string literal or a constant holding one, not #{text.class_name.id}" %}
+    {% end %}
+    {% parsers = ::ByteBuilder::Reader.methods.select { |method| method.annotation(::ByteBuilder::Reader::Parser) } %}
+    {% delimited = ::ByteBuilder::Reader::DELIMITED.map(&.resolve) %}
+    {% pieces = source.is_a?(StringInterpolation) ? source.expressions : [source] %}
+    {% steps = ["(__bbr = #{reader}; true)"] %}
+    {% for piece, index in pieces %}
+      {% following = pieces[index + 1] %}
+      {% if piece.is_a?(StringLiteral) %}
+        {% steps << "__bbr.match?(#{piece})" unless piece.empty? %}
+      {% elsif piece.is_a?(TypeDeclaration) && piece.value.is_a?(Nop) %}
+        {% if delimited.includes?(piece.type.resolve) && !following.is_a?(StringLiteral) && !following.is_a?(NilLiteral) %}
+          {% piece.raise "'#{piece.var}' has no end: a #{piece.type} hole reads up to the literal text that follows it, so it must be followed by literal text or be last" %}
+        {% end %}
+        {% before = following.is_a?(StringLiteral) && !following.empty? ? ", #{following}.to_slice" : "" %}
+        {% steps << "!(#{piece.var} = __bbr.read?(#{piece.type}#{before.id})).nil?" %}
+      {% else %}
+        {% target = piece.is_a?(Assign) ? piece.target : nil %}
+        {% call = piece.is_a?(Assign) ? piece.value : piece %}
+        {% unless call.is_a?(Call) && (call.receiver.is_a?(Nop) || call.receiver.id == reader.id) %}
+          {% piece.raise "a bbread hole must be 'name : Type', 'name = parser(...)' or a parser call, not #{piece.class_name.id}" %}
+        {% end %}
+        {% name = call.name.stringify %}
+        {% base = name.ends_with?("?") ? name[0...-1] : name %}
+        {% overloads = parsers.select { |method| method.name.stringify == base + "?" } %}
+        {% overloads = parsers.select { |method| method.name.stringify == base } if overloads.empty? %}
+        {% if overloads.empty? %}
+          {% call.raise "ByteBuilder::Reader has no parser named '#{base.id}'" %}
+        {% end %}
+        {% named = call.named_args ? call.named_args : [] of ASTNode %}
+        {% count = call.args.size %}
+        {% if named.empty? %}
+          {% fits = overloads.any? do |method|
+               required = method.args.select { |arg| arg.default_value.is_a?(Nop) }.size
+               required <= count && count <= method.args.size
+             end %}
+          {% unless fits %}
+            {% call.raise "parser '#{base.id}' does not take #{count} argument(s): its signatures are #{overloads.map { |method| "#{base.id}(#{method.args.join(", ").id})" }.join(" and ").id}" %}
+          {% end %}
+        {% end %}
+        {% matching = overloads.all? { |method| method.annotation(::ByteBuilder::Reader::Parser)[:match] } %}
+        {% if target && matching %}
+          {% piece.raise "parser '#{base.id}' only matches text and has no value to assign" %}
+        {% end %}
+        {% arguments = call.args.map { |arg| "#{arg}" } + named.map { |arg| "#{arg.name}: #{arg.value}" } %}
+        {% invocation = "__bbr.#{overloads[0].name}(#{arguments.join(", ").id})" %}
+        {% invocation = invocation + " #{call.block}" if call.block %}
+        {% invocation = "#{target} = #{invocation.id}" if target %}
+        {% steps << (matching ? "(#{invocation.id})" : "!(#{invocation.id}).nil?") %}
+      {% end %}
+    {% end %}
+    {% steps << "(#{reader} = __bbr; true)" %}
+    ({{steps.join(" && ").id}})
+  end
 end

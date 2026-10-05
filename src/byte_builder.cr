@@ -2,6 +2,7 @@
 require "./byte_builder/builder"
 require "./byte_builder/base64"
 require "./byte_builder/sink"
+require "./byte_builder/reader"
 require "./byte_builder/template"
 require "./byte_builder/macros"
 
@@ -20,4 +21,8 @@ macro bbwrite(builder, text)
     {% end %}
     ::ByteBuilder.expand({{builder}}, {{text}}, "write", "", {{taken.join(",")}})
   {% end %}
+end
+
+macro bbread(reader, text)
+  ::ByteBuilder.match({{reader}}, {{text}})
 end

@@ -73,4 +73,72 @@ describe ByteBuilder::Template do
     bbwrite builder, "<#{format(template, row, "x" * 50)}>#{row}"
     text(builder).should eq("<[3:#{"x" * 50}]>3")
   end
+
+  it "scans typed captures back out of text" do
+    template = ByteBuilder::Template.new("\e[{0};{1}H{2}|{3}")
+    reader   = ByteBuilder::Reader.new("\e[12;40Hlabel|é")
+    captures = reader.scan(template, Int32, UInt8, String, Char)
+    typeof(captures).should eq(Tuple(Int32, UInt8, String, Char))
+    captures.should eq({12, 40_u8, "label", 'é'})
+    reader.eof?.should be_true
+  end
+
+  it "scans named formats" do
+    template = ByteBuilder::Template.new("{0:int3}/{1:int2}/{2:hex}/{3:hex2}/{4:base64}/{5:plain}")
+    builder  = ByteBuilder.new(16)
+    builder.format(template, 255, 9, 0xbeef_u32, 0x0a_u8, "hi", "tail")
+    reader = ByteBuilder::Reader.new(builder.written)
+    value  = reader.scan?(template, Int32, Int32, UInt32, UInt8, String, Bytes)
+    value.should_not be_nil
+    if value
+      value[0].should eq(255)
+      value[1].should eq(9)
+      value[2].should eq(0xbeef_u32)
+      value[3].should eq(0x0a_u8)
+      value[4].should eq("aGk=")
+      String.new(value[5]).should eq("tail")
+    end
+  end
+
+  it "restores the cursor when a scan fails" do
+    template = ByteBuilder::Template.new("<{0};{1}>")
+    reader   = ByteBuilder::Reader.new("x<1;2]<3;4>")
+    reader.byte
+    reader.scan?(template, Int32, Int32).should be_nil
+    reader.pos.should eq(1)
+    expect_raises(ByteBuilder::Reader::Error, "expected text matching the template at byte 1") do
+      reader.scan(template, Int32, Int32)
+    end
+    reader.take(5)
+    reader.scan?(template, Int32, Int32).should eq({3, 4})
+  end
+
+  it "scans templates without placeholders and repeated placeholders" do
+    reader = ByteBuilder::Reader.new("plain1-2")
+    reader.scan?(ByteBuilder::Template.new("plain")).should eq(Tuple.new)
+    reader.scan?(ByteBuilder::Template.new("{0}-{0}"), Int32).should eq({2})
+    reader.eof?.should be_true
+  end
+
+  it "rejects scans whose types do not fit the template" do
+    reader = ByteBuilder::Reader.new("1 2")
+    expect_raises(ArgumentError, "template needs 2 type(s), got 1") do
+      reader.scan?(ByteBuilder::Template.new("{0} {1}"), Int32)
+    end
+    expect_raises(ArgumentError, "template has no placeholder for argument 0") do
+      reader.scan?(ByteBuilder::Template.new("1 {1}"), Int32, Int32)
+    end
+    expect_raises(ArgumentError, "formats int2 and int3 read an Int32, not String") do
+      reader.scan?(ByteBuilder::Template.new("{0:int2}"), String)
+    end
+    expect_raises(ArgumentError, "format hex reads an unsigned integer, not Int32") do
+      reader.scan?(ByteBuilder::Template.new("{0:hex}"), Int32)
+    end
+    expect_raises(ArgumentError, "format hex2 reads a UInt8, not UInt16") do
+      reader.scan?(ByteBuilder::Template.new("{0:hex2}"), UInt16)
+    end
+    expect_raises(ArgumentError, "format base64 reads a String or Bytes, not Int32") do
+      reader.scan?(ByteBuilder::Template.new("{0:base64}"), Int32)
+    end
+  end
 end

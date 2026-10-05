@@ -87,6 +87,14 @@ class ByteBuilder
       end
     end
 
+    def each_step(& : Bytes, Int32, Format, Bytes? ->) : Nil
+      @ops.each_with_index do |op, index|
+        following = @ops[index + 1]?
+        before    = following && following.size > 0 ? @literals[following.offset, following.size] : nil
+        yield @literals[op.offset, op.size], op.argument, op.format, before
+      end
+    end
+
     private def check(count : Int32) : Nil
       if count < @arity
         raise ArgumentError.new("template needs #{@arity} argument(s), got #{count}")
@@ -168,5 +176,96 @@ class ByteBuilder
   def format(template : Template, *arguments) : self
     reserve(template.bound(arguments))
     unsafe_format(template, *arguments)
+  end
+
+  struct Reader
+    @[Parser]
+    def scan?(template : Template, *types : *T) forall T
+      {% begin %}
+        unless template.arity == {{T.size}}
+          raise ArgumentError.new("template needs #{template.arity} type(s), got {{T.size}}")
+        end
+        start = @pos
+        {% for type, index in T %}
+          value{{index}} = nil.as({{type.instance}}?)
+        {% end %}
+        template.each_step do |literal, argument, format, before|
+          unless match?(literal)
+            @pos = start
+            return nil
+          end
+          {% unless T.size == 0 %}
+            case argument
+            {% for type, index in T %}
+              when {{index}}
+                value{{index}} = scan_value(format, {{type.instance}}, before)
+                if value{{index}}.nil?
+                  @pos = start
+                  return nil
+                end
+            {% end %}
+            end
+          {% end %}
+        end
+        ::Tuple.new(
+          {% for type, index in T %}
+            (value{{index}}.nil? ? raise ArgumentError.new("template has no placeholder for argument {{index}}") : value{{index}}),
+          {% end %}
+        )
+      {% end %}
+    end
+
+    def scan(template : Template, *types)
+      value = scan?(template, *types)
+      value.nil? ? fail("text matching the template") : value
+    end
+
+    private def scan_value(format : Template::Format, type : T.class, before : Bytes?) : T? forall T
+      case format
+      in .plain?        then read?(type, before)
+      in .int2?, .int3? then int?(small_type(type))
+      in .hex?          then hex?(unsigned_type(type))
+      in .hex2?         then hex?(octet_type(type), 2)
+      in .base64?       then encoded(type, base64)
+      end
+    end
+
+    private def small_type(type : Int32.class) : Int32.class
+      type
+    end
+
+    private def small_type(type) : NoReturn
+      raise ArgumentError.new("formats int2 and int3 read an Int32, not #{type}")
+    end
+
+    {% for type in [UInt8, UInt16, UInt32, UInt64] %}
+      private def unsigned_type(type : {{type}}.class) : {{type}}.class
+        type
+      end
+    {% end %}
+
+    private def unsigned_type(type) : NoReturn
+      raise ArgumentError.new("format hex reads an unsigned integer, not #{type}")
+    end
+
+    private def octet_type(type : UInt8.class) : UInt8.class
+      type
+    end
+
+    private def octet_type(type) : NoReturn
+      raise ArgumentError.new("format hex2 reads a UInt8, not #{type}")
+    end
+
+    private def encoded(type : Bytes.class, value : Bytes) : Bytes
+      value
+    end
+
+    private def encoded(type : String.class, value : Bytes) : String
+      String.new(value)
+    end
+
+    private def encoded(type, value : Bytes) : NoReturn
+      raise ArgumentError.new("format base64 reads a String or Bytes, not #{type}")
+    end
   end
 end
